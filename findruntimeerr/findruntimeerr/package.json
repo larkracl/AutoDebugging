@@ -1,0 +1,85 @@
+
+{
+  "name": "findruntimeerr",
+  "displayName": "FindRuntimeErr",
+  "description": "Detects runtime errors in Python code.",
+  "version": "0.0.1",
+  "engines": {
+    "vscode": "^1.87.0"
+  },
+  "categories": [
+    "Linters"
+  ],
+  "activationEvents": [
+		"onLanguage:python",
+		"onCommand:findRuntimeErr.analyzeCurrentFile",
+		"onCommand:findRuntimeErr.runDynamicAnalysis"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "findRuntimeErr.analyzeCurrentFile",
+        "title": "Find Runtime Errors: Analyze Current Python File"
+      },
+      {
+        "command": "findRuntimeErr.runDynamicAnalysis",
+        "title": "Find Runtime Errors: Run Dynamic Analysis"
+      }
+    ],
+    "configuration": {
+      "title": "FindRuntimeErr",
+      "properties": {
+        "findRuntimeErr.enable": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable/disable real-time runtime error analysis."
+        },
+        "findRuntimeErr.severityLevel": {
+          "type": "string",
+          "enum": [
+            "error",
+            "warning",
+            "information",
+            "hint"
+          ],
+          "default": "error",
+          "description": "Set the severity level for reported errors."
+        },
+        "findRuntimeErr.enableDynamicAnalysis": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable/disable dynamic analysis (experimental)."
+        },
+        "findRuntimeErr.ignoredErrorTypes":{ 
+          "type": "array",
+          "default": [],
+          "description": "An array of error types to ignore.",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile && npm run lint",
+    "lint": "eslint src --ext ts",
+    "test": "vscode-test"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.6",
+    "@types/node": "18.x",
+    "@types/vscode": "^1.87.0",
+    "@typescript-eslint/eslint-plugin": "^7.1.0",
+    "@typescript-eslint/parser": "^7.1.0",
+    "eslint": "^8.57.0",
+    "mocha": "^10.3.0",
+    "typescript": "^5.3.3",
+    "@vscode/test-cli": "^0.0.6",
+    "@vscode/test-electron": "^2.3.9"
+  }
+}
