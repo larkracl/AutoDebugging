@@ -45,7 +45,7 @@ function activate(context) {
             return;
         }
         const pythonProcess = (0, child_process_1.spawn)("python3", [
-            path.join(context.extensionPath, "main.py"),
+            path.join(context.extensionPath, "scripts", "main.py"),
             mode,
         ]);
         let stdoutData = "";

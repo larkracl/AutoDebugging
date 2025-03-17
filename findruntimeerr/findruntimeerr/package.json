@@ -1,4 +1,3 @@
-
 {
   "name": "findruntimeerr",
   "displayName": "FindRuntimeErr",
@@ -11,9 +10,9 @@
     "Linters"
   ],
   "activationEvents": [
-		"onLanguage:python",
-		"onCommand:findRuntimeErr.analyzeCurrentFile",
-		"onCommand:findRuntimeErr.runDynamicAnalysis"
+    "onLanguage:python",
+    "onCommand:findRuntimeErr.analyzeCurrentFile",
+    "onCommand:findRuntimeErr.runDynamicAnalysis"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -51,7 +50,7 @@
           "default": false,
           "description": "Enable/disable dynamic analysis (experimental)."
         },
-        "findRuntimeErr.ignoredErrorTypes":{ 
+        "findRuntimeErr.ignoredErrorTypes": {
           "type": "array",
           "default": [],
           "description": "An array of error types to ignore.",
