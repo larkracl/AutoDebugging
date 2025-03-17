@@ -73,7 +73,7 @@ export function activate(context: vscode.ExtensionContext) {
     }
 
     const pythonProcess = spawn("python3", [
-      path.join(context.extensionPath, "main.py"),
+      path.join(context.extensionPath, "scripts", "main.py"),
       mode,
     ]);
 
