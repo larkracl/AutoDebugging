@@ -1,0 +1,24 @@
+{
+  "name": "My VS Code Extension Dev Container", // 컨테이너 이름
+  "build": {
+    "dockerfile": "Dockerfile" // Dockerfile 경로
+  },
+  "settings": {
+    "terminal.integrated.shell.linux": "/bin/bash", // 컨테이너 내 터미널 쉘
+    "python.defaultInterpreterPath": "/app/.venv/bin/python3", // Python 인터프리터 경로
+    "python.linting.pylintEnabled": true,
+    "python.linting.enabled": true
+  },
+  "extensions": [
+    // 컨테이너에 설치할 VS Code 확장 ID 목록
+    "dbaeumer.vscode-eslint",
+    "esbenp.prettier-vscode",
+    "ms-python.python" // Python 확장 추가
+  ],
+  "forwardPorts": [], // 포트 포워딩 설정 (필요시)
+  "postCreateCommand": "npm install &&  cd /app/findruntimeerr && pip install -r .devcontainer/requirements.txt", // 컨테이너 생성 후 실행할 명령어
+  "remoteUser": "node", // 컨테이너 내 사용자
+  "mounts": [
+    "source=${localWorkspaceFolder},target=/app,type=bind,consistency=cached"
+  ]
+}
