@@ -10,9 +10,7 @@
     "Linters"
   ],
   "activationEvents": [
-    "onLanguage:python",
-    "onCommand:findRuntimeErr.analyzeCurrentFile",
-    "onCommand:findRuntimeErr.runDynamicAnalysis"
+    "onLanguage:python"
   ],
   "main": "./out/extension.js",
   "contributes": {
