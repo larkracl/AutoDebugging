@@ -4,9 +4,12 @@ from typing import Optional, Set
 
 def get_type(node: astroid.NodeNG) -> Optional[str]:
     """astroid 노드의 타입을 추론합니다."""
+    print(f"get_type called with node: {node!r}")  # 디버깅 출력
     try:
         for inferred in node.infer():
+            print(f"  Inferred: {inferred!r}")  # 디버깅 출력
             if inferred is astroid.Uninferable:
+                print("  Uninferable")  # 디버깅 출력
                 return None
 
             if isinstance(inferred, astroid.Const):
@@ -28,12 +31,17 @@ def get_type(node: astroid.NodeNG) -> Optional[str]:
             elif isinstance(inferred, astroid.Name):  # 변수
                 if inferred.name in ('True', 'False'):
                     return 'bool'
+            elif isinstance(inferred, astroid.Call): # 함수 호출
+                if inferred.func.name == 'len': # len()함수
+                    return 'int'
     except astroid.InferenceError:
+        print("  InferenceError in get_type")  # 디버깅 출력
         return None
     return None
 
 def is_compatible(type1: Optional[str], type2: Optional[str], op: str) -> bool:
     """두 타입이 주어진 연산에 대해 호환되는지 확인합니다."""
+    print(f"is_compatible called with type1: {type1}, type2: {type2}, op: {op}")  # 디버깅 출력
     if type1 is None or type2 is None:  # 타입을 추론할 수 없는 경우
         return True  # 일단 호환된다고 가정 (더 정교한 분석 필요)
 
@@ -61,6 +69,7 @@ def is_compatible(type1: Optional[str], type2: Optional[str], op: str) -> bool:
 
 def collect_defined_variables(func_node: astroid.FunctionDef) -> Set[str]:
     """함수 내에서 정의된 변수 이름을 수집합니다."""
+    print(f"collect_defined_variables called with func_node: {func_node!r}")  # 디버깅 출력
     defined_vars: Set[str] = set()
     # 함수 매개변수
     for arg in func_node.args.args + func_node.args.posonlyargs + func_node.args.kwonlyargs:
