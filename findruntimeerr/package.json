@@ -29,8 +29,8 @@
       "properties": {
         "findRuntimeErr.enable": {
           "type": "boolean",
-          "default": true,
-          "description": "Enable/disable real-time runtime error analysis."
+          "default": 50,
+          "description": "Minimum code length (number of characters) required to trigger real-time analysis."
         },
         "findRuntimeErr.severityLevel": {
           "type": "string",
