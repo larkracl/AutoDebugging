@@ -7,7 +7,6 @@ import * as os from "os";
 
 const outputChannel = vscode.window.createOutputChannel("FindRuntimeErr");
 
-// --- 인터페이스 정의 ---
 interface ExtensionConfig {
   enable: boolean;
   severityLevel: vscode.DiagnosticSeverity;
@@ -47,12 +46,11 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(diagnosticCollection);
 
   const errorDecorationType = vscode.window.createTextEditorDecorationType({
-    textDecoration: "underline wavy green", // 밑줄 스타일
-    // 필요시 다른 스타일 추가 (예: overviewRulerLane)
+    textDecoration: "underline wavy green",
   });
 
   let debounceTimeout: NodeJS.Timeout | null = null;
-  const debounceDelay = 500; // ms
+  const debounceDelay = 500;
 
   function getConfiguration(): ExtensionConfig {
     const config = vscode.workspace.getConfiguration("findRuntimeErr");
@@ -86,7 +84,6 @@ export function activate(context: vscode.ExtensionContext) {
     };
   }
 
-  // 분석 실행 함수 (Promise 반환)
   function runAnalysisProcess(
     code: string,
     mode: "realtime" | "static"
@@ -122,37 +119,26 @@ export function activate(context: vscode.ExtensionContext) {
           `[runAnalysis] Python process finished with code: ${closeCode} (${mode})`
         );
         if (closeCode !== 0) {
-          // 오류 발생 시, stdout에 JSON 오류 정보가 있을 수 있음 (main.py에서 출력)
           let errorDetail = `Analysis script failed (Exit Code: ${closeCode}).`;
           if (stdoutData.trim()) {
-            // stdout에 내용이 있으면 파싱 시도
             try {
               const errorResult = JSON.parse(stdoutData);
-              if (
-                errorResult &&
-                Array.isArray(errorResult.errors) &&
-                errorResult.errors.length > 0
-              ) {
-                errorDetail = errorResult.errors[0].message || errorDetail; // 메시지 추출 시도
+              if (errorResult?.errors?.[0]?.message) {
+                errorDetail = errorResult.errors[0].message;
               }
-            } catch {} // 파싱 실패 무시
+            } catch {}
           }
-          // stderr 내용도 추가 (더 자세한 정보 제공 가능성)
           if (stderrData.trim()) {
             errorDetail += `\nStderr: ${stderrData.trim()}`;
           }
-          reject(new Error(errorDetail));
+          reject(new Error(errorDetail)); // 오류 메시지와 함께 reject
           return;
         }
-        // 성공 시
         try {
           outputChannel.appendLine(
             `[runAnalysis] Raw stdout (${mode}): ${stdoutData}`
           );
           if (!stdoutData.trim()) {
-            outputChannel.appendLine(
-              `[runAnalysis] Received empty stdout (${mode}).`
-            );
             resolve({ errors: [], call_graph: null });
             return;
           }
@@ -181,7 +167,6 @@ export function activate(context: vscode.ExtensionContext) {
     });
   }
 
-  // 분석 로직
   async function analyzeCode(
     code: string,
     documentUri: vscode.Uri,
@@ -190,7 +175,6 @@ export function activate(context: vscode.ExtensionContext) {
   ) {
     const config = getConfiguration();
 
-    // 실시간 분석 조건 확인
     if (mode === "realtime") {
       if (!config.enable) {
         outputChannel.appendLine("[analyzeCode] Real-time analysis disabled.");
@@ -206,8 +190,7 @@ export function activate(context: vscode.ExtensionContext) {
       }
     }
 
-    // 분석 시작 전 이전 결과 지우기
-    clearPreviousAnalysis(documentUri);
+    clearPreviousAnalysis(documentUri); // 분석 시작 시 이전 결과 지우기
 
     if (showProgress) {
       await vscode.window.withProgress(
@@ -220,7 +203,7 @@ export function activate(context: vscode.ExtensionContext) {
           try {
             progress.report({ message: "정적 분석 수행 중..." });
             const result = await runAnalysisProcess(code, mode);
-            handleAnalysisResult(documentUri, config, result, mode); // 성공 결과 처리
+            handleAnalysisResult(documentUri, config, result, mode);
             vscode.window.showInformationMessage(
               `FindRuntimeErr: 분석 완료. ${result.errors.length}개의 오류 발견.`
             );
@@ -235,12 +218,10 @@ export function activate(context: vscode.ExtensionContext) {
             outputChannel.appendLine(
               `[analyzeCode] Analysis failed (${mode}): ${error.message}`
             );
-            // 실패 시 오류 표시는 지워진 상태 유지
           }
         }
       );
     } else {
-      // 실시간 분석 (Progress 없이)
       try {
         const result = await runAnalysisProcess(code, mode);
         handleAnalysisResult(documentUri, config, result, mode);
@@ -249,44 +230,28 @@ export function activate(context: vscode.ExtensionContext) {
         outputChannel.appendLine(
           `[analyzeCode] Real-time analysis failed: ${error.message}`
         );
-        // 실시간 분석 실패는 로그만 남김
       }
     }
   }
 
-  // 분석 결과 처리 및 표시
   function handleAnalysisResult(
     documentUri: vscode.Uri,
     config: ExtensionConfig,
-    result: AnalysisResult, // 성공 결과만 받음
-    mode: string // 모드 정보 추가
+    result: AnalysisResult,
+    mode: string
   ) {
     try {
-      const errors: ErrorInfo[] = result.errors || []; // errors는 항상 배열 보장
+      const errors: ErrorInfo[] = result.errors || [];
       outputChannel.appendLine(
         `[handleResult] Processing ${errors.length} errors.`
       );
+      displayDiagnostics(documentUri, config, errors);
 
-      displayDiagnostics(documentUri, config, errors); // 진단 정보 표시
-
-      // 호출 그래프 데이터 처리 (static 모드 결과에만 존재 가능)
       const callGraphData = result.call_graph;
       if (callGraphData && mode === "static") {
         outputChannel.appendLine(`[handleResult] Call graph data received:`);
-        // Output 채널에 JSON 데이터 예쁘게 출력
-        outputChannel.appendLine(JSON.stringify(callGraphData, null, 2));
-
-        // --- 선택: 파일로 저장 ---
-        // const graphFilePath = path.join(os.tmpdir(), `call_graph_${Date.now()}.json`);
-        // try {
-        //     fs.writeFileSync(graphFilePath, JSON.stringify(callGraphData, null, 2));
-        //     outputChannel.appendLine(`[handleResult] Call graph data saved to: ${graphFilePath}`);
-        // } catch (writeErr) {
-        //     outputChannel.appendLine(`[handleResult] Error saving call graph data: ${writeErr}`);
-        // }
-        // ------------------------
-
-        console.log("Call Graph Data:", callGraphData); // 디버그 콘솔에도 출력
+        outputChannel.appendLine(JSON.stringify(callGraphData, null, 2)); // Output 채널에 JSON 출력
+        console.log("Call Graph Data:", callGraphData);
         // TODO: 그래프 데이터 활용 로직
       }
     } catch (error: any) {
@@ -297,7 +262,6 @@ export function activate(context: vscode.ExtensionContext) {
     }
   }
 
-  // 진단 정보 표시 함수 (밑줄 조건 추가)
   function displayDiagnostics(
     documentUri: vscode.Uri,
     config: ExtensionConfig,
@@ -307,7 +271,7 @@ export function activate(context: vscode.ExtensionContext) {
       `[displayDiagnostics] Displaying ${errors.length} diagnostics.`
     );
     const diagnostics: vscode.Diagnostic[] = [];
-    const decorationRanges: vscode.Range[] = []; // 밑줄을 그릴 범위만 저장
+    const decorationRanges: vscode.Range[] = [];
 
     errors.forEach((error) => {
       if (
@@ -328,12 +292,10 @@ export function activate(context: vscode.ExtensionContext) {
       if (!config.ignoredErrorTypes.includes(error.errorType)) {
         const line = Math.max(0, error.line - 1);
         const column = Math.max(0, error.column);
-        const range = new vscode.Range(line, column, line, column + 1); // 기본 범위
+        const range = new vscode.Range(line, column, line, column + 1);
 
         const message = `${error.message} : ${error.errorType} : Line ${error.line}, Column ${error.column} : "AutoDebugging"`;
-        const diagnosticSeverity = config.severityLevel; // 설정된 심각도 사용
-
-        // SyntaxError는 항상 Error로 처리 (설정 무시)
+        const diagnosticSeverity = config.severityLevel;
         const finalSeverity =
           error.errorType === "SyntaxError"
             ? vscode.DiagnosticSeverity.Error
@@ -343,7 +305,7 @@ export function activate(context: vscode.ExtensionContext) {
         diagnostic.code = error.errorType;
         diagnostics.push(diagnostic);
 
-        // 밑줄 표시 조건: Error 또는 Warning인 경우에만
+        // 밑줄 표시 조건: Error 또는 Warning
         if (
           finalSeverity === vscode.DiagnosticSeverity.Error ||
           finalSeverity === vscode.DiagnosticSeverity.Warning
@@ -353,20 +315,17 @@ export function activate(context: vscode.ExtensionContext) {
       }
     });
 
-    // Problems 패널 업데이트
     diagnosticCollection.set(documentUri, diagnostics);
 
-    // 코드 편집기 밑줄 업데이트
     const editor = vscode.window.activeTextEditor;
     if (editor && editor.document.uri.toString() === documentUri.toString()) {
       outputChannel.appendLine(
         `[displayDiagnostics] Setting decorations for ${decorationRanges.length} ranges.`
       );
-      editor.setDecorations(errorDecorationType, decorationRanges); // Error/Warning 범위만 전달
+      editor.setDecorations(errorDecorationType, decorationRanges);
     }
   }
 
-  // 이전 분석 결과(진단 정보, 밑줄)를 지우는 함수
   function clearPreviousAnalysis(documentUri: vscode.Uri) {
     diagnosticCollection.delete(documentUri);
     const editor = vscode.window.activeTextEditor;
@@ -444,7 +403,16 @@ export function activate(context: vscode.ExtensionContext) {
 
   context.subscriptions.push(
     vscode.commands.registerCommand("findRuntimeErr.runDynamicAnalysis", () => {
-      /* ... */
+      const editor = vscode.window.activeTextEditor;
+      if (editor && editor.document.languageId === "python") {
+        vscode.window.showInformationMessage(
+          "FindRuntimeErr: Dynamic analysis is not yet implemented."
+        );
+      } else {
+        vscode.window.showWarningMessage(
+          "FindRuntimeErr: Please open a Python file to run dynamic analysis."
+        );
+      }
     })
   );
 

@@ -1,208 +1,140 @@
 # core.py
 import astroid
-import networkx as nx
 import sys
-import json # json 모듈 import 추가
-from typing import List, Dict, Any, Set, Tuple, Optional
-from checkers import (
-    check_name_errors,
-    check_zero_division_error,
-    check_type_error,
-    check_attribute_error,
-    check_index_error,
-    check_key_error,
-    check_infinite_loop,
-    check_recursion_error,
-    check_file_not_found_error,
-)
+from typing import List, Dict, Any, Set
+# utils는 공통으로 사용
 from utils import collect_defined_variables, get_type, is_compatible
 
-# 그래프 생성을 위한 함수 (core.py 내부에 위치)
-def _build_call_graph_during_analysis(tree: astroid.Module) -> nx.DiGraph:
-    """AST 분석 중 함수 호출 그래프를 생성합니다."""
-    graph = nx.DiGraph()
-    current_func_stack = ["<module>"] # 함수 호출 스택
-
-    def process_node_for_graph(node):
-        """그래프 생성을 위해 AST 노드를 처리합니다."""
+# 모드에 따라 다른 체커 모듈을 동적으로 import (또는 미리 import 해두고 선택)
+# 예시: 동적 import (다른 방식도 가능)
+def _import_checkers(mode: str):
+    if mode == 'realtime':
         try:
-            if isinstance(node, astroid.FunctionDef):
-                func_name = node.name
-                graph.add_node(func_name, type='function', lineno=node.lineno)
-                caller_func = current_func_stack[-1]
-                if caller_func == '<module>':
-                     graph.add_edge(caller_func, func_name, type='defines', lineno=node.lineno)
+            # 현재 스크립트 위치 기준으로 import 시도
+            from . import RT_checkers as checkers
+            print("Imported RT_checkers", file=sys.stderr)
+            return checkers
+        except ImportError:
+            # 단독 실행 또는 다른 환경 대비 절대 import
+            import RT_checkers as checkers
+            print("Imported RT_checkers (absolute)", file=sys.stderr)
+            return checkers
+    elif mode == 'static':
+        try:
+            from . import static_checkers as checkers
+            print("Imported static_checkers", file=sys.stderr)
+            return checkers
+        except ImportError:
+            import static_checkers as checkers
+            print("Imported static_checkers (absolute)", file=sys.stderr)
+            return checkers
+    else:
+        # 다른 모드 (예: dynamic) 또는 오류 처리
+        print(f"Warning: Unsupported analysis mode '{mode}' for importing checkers.", file=sys.stderr)
+        return None # 또는 기본 체커 사용
 
-                current_func_stack.append(func_name)
-                for child in node.get_children():
-                    process_node_for_graph(child)
-                current_func_stack.pop()
-
-            elif isinstance(node, astroid.Call):
-                caller_func = current_func_stack[-1]
-                called_func_name = None
-                call_type = 'calls'
-
-                if isinstance(node.func, astroid.Name):
-                    called_func_name = node.func.name
-                    if called_func_name not in graph:
-                        graph.add_node(called_func_name, type='unknown', lineno=None)
-                    call_type = 'calls'
-
-                elif isinstance(node.func, astroid.Attribute):
-                    call_type = 'calls_method'
-                    try:
-                        expr_str = node.func.expr.as_string()
-                        called_func_name = f"{expr_str}.{node.func.attrname}"
-                        graph.add_node(called_func_name, type='method', lineno=None)
-                    except Exception:
-                        called_func_name = f"?.{node.func.attrname}"
-                        graph.add_node(called_func_name, type='method', lineno=None)
-
-                if called_func_name and caller_func:
-                    if caller_func not in graph:
-                       graph.add_node(caller_func, type='module' if caller_func=='<module>' else 'unknown', lineno=None)
-
-                    if graph.has_edge(caller_func, called_func_name):
-                         if 'call_sites' in graph.edges[caller_func, called_func_name]:
-                             graph.edges[caller_func, called_func_name]['call_sites'].append(node.lineno)
-                         else:
-                              graph.edges[caller_func, called_func_name]['call_sites'] = [node.lineno]
-                    else:
-                         graph.add_edge(caller_func, called_func_name, type=call_type, call_sites=[node.lineno])
-
-                for child in node.get_children():
-                    process_node_for_graph(child)
-
-            else:
-                for child in node.get_children():
-                    process_node_for_graph(child)
-        except Exception as e:
-            print(f"  Error building graph for node {node!r}: {e}", file=sys.stderr)
-
-    print("Starting call graph building within analysis...", file=sys.stderr)
-    process_node_for_graph(tree) # AST 전체 순회하며 그래프 생성
-    print("Call graph building finished.", file=sys.stderr)
-
-     # '<module>' 노드 제거 및 관련 간선 처리
-    if '<module>' in graph:
-        module_defines = [v for u, v, data in graph.edges(data=True) if u == '<module>' and data.get('type') == 'defines']
-        graph.remove_node('<module>')
-        for node_name in module_defines:
-             if node_name not in graph:
-                 graph.add_node(node_name, type='function', lineno=None)
-
-    return graph
-
-
-def analyze_code(code: str, mode: str = 'realtime') -> Dict[str, Any]: # 반환 타입 변경
-    """
-    Python 코드를 분석하여 잠재적인 런타임 에러와 함수 호출 그래프를 찾습니다.
-
-    Args:
-        code: 분석할 Python 코드 문자열.
-        mode: 'realtime', 'static'.
-
-    Returns:
-        분석 결과를 담은 딕셔너리: {'errors': 오류 리스트, 'call_graph': 호출 그래프 데이터 (JSON)}
-    """
+def analyze_code(code: str, mode: str = 'realtime') -> Dict[str, Any]:
     print(f"analyze_code called with mode: {mode}", file=sys.stderr)
-    errors = [] # errors 리스트를 먼저 초기화
+    errors = []
     call_graph = None
+    checkers = _import_checkers(mode) # 모드에 맞는 체커 모듈 로드
+
+    if checkers is None and mode != 'dynamic': # dynamic 제외하고 체커 로드 실패 시
+         return {'errors': [{'message': f"Failed to load checkers for mode '{mode}'", 'line': 1, 'column': 0, 'errorType': 'CheckerLoadError'}], 'call_graph': None}
 
     try:
         tree = astroid.parse(code)
         print(f"AST parsed successfully", file=sys.stderr)
 
-        # 1. 함수 호출 그래프 생성 (static 모드에서만)
+        # 그래프 생성 (static 모드에서만)
         if mode == 'static':
-            call_graph = _build_call_graph_during_analysis(tree)
+            from networkx import DiGraph # 필요할 때 import
+            from utils import build_call_graph_during_analysis # utils로 이동 가정
+            call_graph_obj = build_call_graph_during_analysis(tree)
 
-        # 2. 오류 분석 수행
-        # 함수별 분석
-        for func_node in tree.body:
-            if isinstance(func_node, astroid.FunctionDef):
-                _analyze_function(func_node, errors, mode)
+        # 오류 분석 수행
+        for node in tree.body:
+            if isinstance(node, astroid.FunctionDef):
+                _analyze_function(node, errors, mode, checkers)
+            # 모듈 수준 노드에 대한 검사 (필요 시 checkers 모듈 함수 호출)
+            if mode == 'static': # static 모드에서 모듈 분석
+                 _analyze_module(node, errors, checkers)
 
-        # 모듈 수준 분석
-        if mode == 'static': # static 모드에서만 모듈 분석 수행
-            _analyze_module(tree, errors)
 
+    # ... (SyntaxError, Exception 처리 - 이전과 유사하게 errors 리스트에 추가) ...
     except astroid.AstroidSyntaxError as e:
-        print(f"SyntaxError during parsing: {e}", file=sys.stderr) # 로그 강화
-        # SyntaxError 정보를 errors 리스트에 추가
-        errors.append({
-            'message': f"SyntaxError: {e.msg}",
-            'line': e.line,
-            'column': e.col,
-            'errorType': 'SyntaxError'
-        })
-        # SyntaxError 발생 시에는 호출 그래프는 없음
-        call_graph = None
-
+        print(f"SyntaxError: {e}", file=sys.stderr)
+        errors.append({'message': f"SyntaxError: {e.msg}",'line': e.line,'column': e.col,'errorType': 'SyntaxError'})
     except Exception as e:
-        print(f"Exception during analysis: {e}", file=sys.stderr) # 로그 강화
-        # 기타 예외 발생 시 AnalysisError 추가
-        errors.append({
-            "message": f"An error occurred during analysis: {e}",
-            "line": 1, # 오류 위치 특정 불가
-            "column": 0,
-            "errorType": "AnalysisError",
-        })
-        call_graph = None
+        import traceback
+        print(f"Exception during analysis: {e}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
+        errors.append({'message': f"An error occurred during analysis: {e}",'line': 1,'column': 0,'errorType': 'AnalysisError'})
 
-    # 3. 결과 조합
-    result = {'errors': errors} # errors는 항상 리스트
+
+    # 결과 조합
+    result = {'errors': errors}
     if call_graph is not None:
-         from networkx.readwrite import json_graph # 필요할 때 import
+         from networkx.readwrite import json_graph
          try:
-             # node_link_data는 JSON 직렬화 가능한 딕셔너리를 반환
-             result['call_graph'] = json_graph.node_link_data(call_graph)
+             result['call_graph'] = json_graph.node_link_data(call_graph_obj)
          except Exception as e:
              print(f"Error converting graph to JSON: {e}", file=sys.stderr)
-             result['call_graph'] = None # 변환 실패 시 null
+             result['call_graph'] = None
     else:
-         result['call_graph'] = None # 그래프 데이터가 없는 경우 null
+         result['call_graph'] = None
 
-    # 최종 반환 전에 errors가 리스트인지 다시 확인 (더욱 안전하게)
     if not isinstance(result.get('errors'), list):
-        print("Critical Error: 'errors' is not a list before returning!", file=sys.stderr)
-        result['errors'] = [] # 강제로 빈 리스트로
+        result['errors'] = []
 
     print(f"analyze_code returning result with {len(result['errors'])} errors.", file=sys.stderr)
     return result
 
-# _analyze_function, _analyze_module, 오류 검사 함수들(_check_...), 유틸리티 함수들은 이전과 동일
-def _analyze_function(func_node: astroid.FunctionDef, errors: list, mode: str):
-    """함수 단위 분석."""
+
+def _analyze_function(func_node: astroid.FunctionDef, errors: list, mode: str, checkers):
+    """함수 단위 분석 (선택된 체커 모듈 사용)."""
+    if checkers is None: return # 체커 없으면 분석 불가
+
     defined_vars: Set[str] = collect_defined_variables(func_node)
 
-    # 재귀 호출 검사
-    check_recursion_error(func_node, errors)
+    # 재귀 호출 검사 (필요 시 checkers 모듈로 이동 가능)
+    if hasattr(checkers, 'check_recursion_error'):
+        checkers.check_recursion_error(func_node, errors)
 
     # 함수 본문 분석
     for node in func_node.body:
-        check_name_errors(node, defined_vars, errors)  # 모든 모드에서 NameError 검사
+        if hasattr(checkers, 'check_name_errors'):
+            checkers.check_name_errors(node, defined_vars, errors)
 
-        if mode == 'realtime':
-            if isinstance(node, astroid.BinOp):
-                check_zero_division_error(node, errors)  # ZeroDivisionError
+        if isinstance(node, astroid.BinOp):
+            if hasattr(checkers, 'check_zero_division_error'):
+                checkers.check_zero_division_error(node, errors)
+            if mode == 'static' and hasattr(checkers, 'check_type_error'):
+                checkers.check_type_error(node, errors)
+        elif isinstance(node, astroid.Attribute):
+            if mode == 'static' and hasattr(checkers, 'check_attribute_error'):
+                checkers.check_attribute_error(node, errors)
+        elif isinstance(node, astroid.Subscript):
+            if mode == 'static' and hasattr(checkers, 'check_index_error'):
+                checkers.check_index_error(node, errors)
+            if mode == 'static' and hasattr(checkers, 'check_key_error'):
+                checkers.check_key_error(node, errors)
 
-        elif mode == 'static':
-            if isinstance(node, astroid.BinOp):
-                check_zero_division_error(node, errors)  # ZeroDivisionError
-                check_type_error(node, errors)  # TypeError
-            elif isinstance(node, astroid.Attribute):
-                check_attribute_error(node, errors)  # AttributeError
-            elif isinstance(node, astroid.Subscript):
-                check_index_error(node, errors)  # IndexError
-                check_key_error(node, errors)  # KeyError
+        # defined_vars 업데이트 (Assign 노드 처리)
+        if isinstance(node, astroid.Assign):
+             for target in node.targets:
+                 if isinstance(target, astroid.Name):
+                     defined_vars.add(target.name)
+        # TODO: 다른 변수 정의 케이스 (AugAssign, For 등) 처리
 
+def _analyze_module(module_node: astroid.Module, errors: list, checkers):
+    """모듈 단위 분석 (선택된 체커 모듈 사용)."""
+    if checkers is None: return
 
-def _analyze_module(module_node: astroid.Module, errors: list):
-    """모듈 단위 분석."""
     for node in module_node.body:
         if isinstance(node, astroid.Call) and isinstance(node.func, astroid.Name) and node.func.name == "open":
-            check_file_not_found_error(node, errors)
+            if hasattr(checkers, 'check_file_not_found_error'):
+                checkers.check_file_not_found_error(node, errors)
         elif isinstance(node, astroid.While):
-            check_infinite_loop(node, errors)  # 최상위 while 루프
+             if hasattr(checkers, 'check_infinite_loop'):
+                checkers.check_infinite_loop(node, errors)
