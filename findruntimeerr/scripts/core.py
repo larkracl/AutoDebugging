@@ -1,6 +1,8 @@
 # core.py
 import astroid
-import networkx as nx # networkx 추가
+import networkx as nx
+import sys
+import json # json 모듈 import 추가
 from typing import List, Dict, Any, Set, Tuple, Optional
 from checkers import (
     check_name_errors,
@@ -13,8 +15,9 @@ from checkers import (
     check_recursion_error,
     check_file_not_found_error,
 )
-from utils import collect_defined_variables, get_type, is_compatible # 추가
+from utils import collect_defined_variables, get_type, is_compatible
 
+# 그래프 생성을 위한 함수 (core.py 내부에 위치)
 def _build_call_graph_during_analysis(tree: astroid.Module) -> nx.DiGraph:
     """AST 분석 중 함수 호출 그래프를 생성합니다."""
     graph = nx.DiGraph()
@@ -31,7 +34,6 @@ def _build_call_graph_during_analysis(tree: astroid.Module) -> nx.DiGraph:
                      graph.add_edge(caller_func, func_name, type='defines', lineno=node.lineno)
 
                 current_func_stack.append(func_name)
-                # 재귀적으로 자식 노드 처리
                 for child in node.get_children():
                     process_node_for_graph(child)
                 current_func_stack.pop()
@@ -69,16 +71,13 @@ def _build_call_graph_during_analysis(tree: astroid.Module) -> nx.DiGraph:
                     else:
                          graph.add_edge(caller_func, called_func_name, type=call_type, call_sites=[node.lineno])
 
-                # 자식 노드 (인자 등) 처리
                 for child in node.get_children():
                     process_node_for_graph(child)
 
             else:
-                # 다른 노드 타입 처리
                 for child in node.get_children():
                     process_node_for_graph(child)
         except Exception as e:
-            # 그래프 생성 중 오류 발생 시 로그 기록 (선택적)
             print(f"  Error building graph for node {node!r}: {e}", file=sys.stderr)
 
     print("Starting call graph building within analysis...", file=sys.stderr)
@@ -108,41 +107,56 @@ def analyze_code(code: str, mode: str = 'realtime') -> Dict[str, Any]: # 반환 
         분석 결과를 담은 딕셔너리: {'errors': 오류 리스트, 'call_graph': 호출 그래프 데이터 (JSON)}
     """
     print(f"analyze_code called with mode: {mode}", file=sys.stderr)
+    errors = [] # errors 리스트를 먼저 초기화
+    call_graph = None
+
     try:
         tree = astroid.parse(code)
         print(f"AST parsed successfully", file=sys.stderr)
-    # ... (예외 처리 동일) ...
+
+        # 1. 함수 호출 그래프 생성 (static 모드에서만)
+        if mode == 'static':
+            call_graph = _build_call_graph_during_analysis(tree)
+
+        # 2. 오류 분석 수행
+        # 함수별 분석
+        for func_node in tree.body:
+            if isinstance(func_node, astroid.FunctionDef):
+                _analyze_function(func_node, errors, mode)
+
+        # 모듈 수준 분석
+        if mode == 'static': # static 모드에서만 모듈 분석 수행
+            _analyze_module(tree, errors)
+
     except astroid.AstroidSyntaxError as e:
-         # ...
-         return {'errors': [{'message': f"SyntaxError: {e.msg}", 'line': e.line, 'column': e.col, 'errorType': 'SyntaxError'}], 'call_graph': None}
+        print(f"SyntaxError during parsing: {e}", file=sys.stderr) # 로그 강화
+        # SyntaxError 정보를 errors 리스트에 추가
+        errors.append({
+            'message': f"SyntaxError: {e.msg}",
+            'line': e.line,
+            'column': e.col,
+            'errorType': 'SyntaxError'
+        })
+        # SyntaxError 발생 시에는 호출 그래프는 없음
+        call_graph = None
+
     except Exception as e:
-         # ...
-         return {'errors': [{'message': f"An error occurred during analysis: {e}", 'line': 1, 'column': 0, 'errorType': 'AnalysisError'}], 'call_graph': None}
-
-
-    errors = []
-    call_graph = None
-
-    # 1. 함수 호출 그래프 생성 (static 모드에서만)
-    if mode == 'static':
-        call_graph = _build_call_graph_during_analysis(tree)
-
-    # 2. 오류 분석 수행
-    # 함수별 분석
-    for func_node in tree.body:
-        if isinstance(func_node, astroid.FunctionDef):
-            _analyze_function(func_node, errors, mode)
-
-    # 모듈 수준 분석
-    if mode == 'static': # static 모드에서만 모듈 분석 수행
-        _analyze_module(tree, errors)
-
+        print(f"Exception during analysis: {e}", file=sys.stderr) # 로그 강화
+        # 기타 예외 발생 시 AnalysisError 추가
+        errors.append({
+            "message": f"An error occurred during analysis: {e}",
+            "line": 1, # 오류 위치 특정 불가
+            "column": 0,
+            "errorType": "AnalysisError",
+        })
+        call_graph = None
 
     # 3. 결과 조합
-    result = {'errors': errors}
+    result = {'errors': errors} # errors는 항상 리스트
     if call_graph is not None:
          from networkx.readwrite import json_graph # 필요할 때 import
          try:
+             # node_link_data는 JSON 직렬화 가능한 딕셔너리를 반환
              result['call_graph'] = json_graph.node_link_data(call_graph)
          except Exception as e:
              print(f"Error converting graph to JSON: {e}", file=sys.stderr)
@@ -150,10 +164,15 @@ def analyze_code(code: str, mode: str = 'realtime') -> Dict[str, Any]: # 반환 
     else:
          result['call_graph'] = None # 그래프 데이터가 없는 경우 null
 
-    print(f"analyze_code returning result", file=sys.stderr)
+    # 최종 반환 전에 errors가 리스트인지 다시 확인 (더욱 안전하게)
+    if not isinstance(result.get('errors'), list):
+        print("Critical Error: 'errors' is not a list before returning!", file=sys.stderr)
+        result['errors'] = [] # 강제로 빈 리스트로
+
+    print(f"analyze_code returning result with {len(result['errors'])} errors.", file=sys.stderr)
     return result
 
-
+# _analyze_function, _analyze_module, 오류 검사 함수들(_check_...), 유틸리티 함수들은 이전과 동일
 def _analyze_function(func_node: astroid.FunctionDef, errors: list, mode: str):
     """함수 단위 분석."""
     defined_vars: Set[str] = collect_defined_variables(func_node)
