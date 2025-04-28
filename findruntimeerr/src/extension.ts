@@ -2,6 +2,8 @@
 import * as vscode from "vscode";
 import { spawn } from "child_process";
 import * as path from "path";
+import * as fs from "fs"; // 파일 시스템 모듈 추가
+import * as os from "os"; // 운영 체제 모듈 추가
 
 const outputChannel = vscode.window.createOutputChannel("FindRuntimeErr"); // 출력 채널
 
@@ -17,6 +19,24 @@ interface ErrorInfo {
   line: number;
   column: number;
   errorType: string;
+}
+
+// networkx JSON 데이터 타입 (간단하게 any로 정의)
+interface CallGraphData {
+  nodes: { id: string; type?: string; lineno?: number }[];
+  links: {
+    source: string;
+    target: string;
+    type?: string;
+    call_sites?: number[];
+  }[];
+  // 다른 networkx node_link_data 속성들 (directed, multigraph, graph)
+  [key: string]: any;
+}
+
+interface AnalysisResult {
+  errors: ErrorInfo[];
+  call_graph: CallGraphData | null; // 호출 그래프 데이터 또는 null
 }
 
 export function activate(context: vscode.ExtensionContext) {
@@ -68,7 +88,11 @@ export function activate(context: vscode.ExtensionContext) {
   ) {
     diagnosticCollection.clear();
     const config = getConfiguration();
-    if (!config.enable) {
+    if (!config.enable && mode === "realtime") {
+      // 실시간 분석만 설정에 따라 비활성화
+      outputChannel.appendLine(
+        "[analyzeCode] Real-time analysis disabled by configuration."
+      );
       return;
     }
 
@@ -99,14 +123,21 @@ export function activate(context: vscode.ExtensionContext) {
 
             pythonProcess.stderr.on("data", (data) => {
               stderrData += data;
+              outputChannel.appendLine(`[Python Stderr] ${data}`); // 로그 출력
             });
 
-            pythonProcess.on("close", (code) => {
-              if (code !== 0) {
-                console.error(`Python script exited with code ${code}`);
+            pythonProcess.on("close", (closeCode) => {
+              outputChannel.appendLine(
+                `[analyzeCode] Python process finished with code: ${closeCode}`
+              );
+              if (closeCode !== 0) {
+                console.error(`Python script exited with code ${closeCode}`);
                 console.error(stderrData);
                 vscode.window.showErrorMessage(
                   `FindRuntimeErr: Error analyzing code. See output for details. ${stderrData}`
+                );
+                outputChannel.appendLine(
+                  `[analyzeCode] Analysis script error: ${stderrData}`
                 );
                 const editor = vscode.window.activeTextEditor;
                 if (editor) {
@@ -123,7 +154,16 @@ export function activate(context: vscode.ExtensionContext) {
               }
 
               try {
-                const errors: ErrorInfo[] = JSON.parse(stdoutData);
+                outputChannel.appendLine(
+                  `[analyzeCode] Raw stdout: ${stdoutData}`
+                ); // Raw 데이터 로깅
+                const result: AnalysisResult = JSON.parse(stdoutData);
+                const errors: ErrorInfo[] = result.errors || []; // errors 키 접근
+                const callGraphData = result.call_graph; // call_graph 키 접근
+                outputChannel.appendLine(
+                  `[analyzeCode] Parsed ${errors.length} errors.`
+                );
+
                 const diagnostics: vscode.Diagnostic[] = [];
                 const decorationRanges: vscode.Range[] = [];
 
@@ -156,14 +196,31 @@ export function activate(context: vscode.ExtensionContext) {
                 ) {
                   editor.setDecorations(errorDecorationType, decorationRanges);
                 }
+
+                // 호출 그래프 데이터 활용
+                if (callGraphData) {
+                  outputChannel.appendLine(
+                    `[analyzeCode] Call graph data received with ${callGraphData.nodes.length} nodes and ${callGraphData.links.length} links.`
+                  );
+                  // TODO: callGraphData를 사용하여 필요한 작업 수행
+                  console.log("Call Graph Data:", callGraphData); // 디버깅용
+                } else if (mode === "static") {
+                  // static 모드였는데 그래프가 없으면 로그
+                  outputChannel.appendLine(
+                    "[analyzeCode] Call graph data is null or undefined even in static mode."
+                  );
+                }
               } catch (parseError) {
                 console.error(
                   "Error parsing Python script output:",
                   parseError
                 );
-                console.error("Raw output:", stdoutData);
+                console.error("Raw output:", stdoutData); // Raw 데이터 다시 로깅
                 vscode.window.showErrorMessage(
                   `FindRuntimeErr: Error parsing analysis results. See output for details. ${parseError}`
+                );
+                outputChannel.appendLine(
+                  `[analyzeCode] JSON parse error: ${parseError}`
                 );
 
                 const editor = vscode.window.activeTextEditor;
@@ -197,14 +254,21 @@ export function activate(context: vscode.ExtensionContext) {
 
       pythonProcess.stderr.on("data", (data) => {
         stderrData += data;
+        outputChannel.appendLine(`[Python Stderr] ${data}`); // 로그 출력
       });
 
-      pythonProcess.on("close", (code) => {
-        if (code !== 0) {
-          console.error(`Python script exited with code ${code}`);
+      pythonProcess.on("close", (closeCode) => {
+        outputChannel.appendLine(
+          `[analyzeCode] Python process finished with code: ${closeCode} (realtime)`
+        );
+        if (closeCode !== 0) {
+          console.error(`Python script exited with code ${closeCode}`);
           console.error(stderrData);
           vscode.window.showErrorMessage(
             `FindRuntimeErr: Error analyzing code. See output for details. ${stderrData}`
+          );
+          outputChannel.appendLine(
+            `[analyzeCode] Analysis script error (realtime): ${stderrData}`
           );
           const editor = vscode.window.activeTextEditor;
           if (editor) {
@@ -220,7 +284,15 @@ export function activate(context: vscode.ExtensionContext) {
         }
 
         try {
-          const errors: ErrorInfo[] = JSON.parse(stdoutData);
+          outputChannel.appendLine(
+            `[analyzeCode] Raw stdout (realtime): ${stdoutData}`
+          ); // Raw 데이터 로깅
+          const result: AnalysisResult = JSON.parse(stdoutData);
+          const errors: ErrorInfo[] = result.errors || [];
+          outputChannel.appendLine(
+            `[analyzeCode] Parsed ${errors.length} errors (realtime).`
+          );
+
           const diagnostics: vscode.Diagnostic[] = [];
           const decorationRanges: vscode.Range[] = [];
 
@@ -255,9 +327,12 @@ export function activate(context: vscode.ExtensionContext) {
           }
         } catch (parseError) {
           console.error("Error parsing Python script output:", parseError);
-          console.error("Raw output:", stdoutData);
+          console.error("Raw output:", stdoutData); // Raw 데이터 다시 로깅
           vscode.window.showErrorMessage(
             `FindRuntimeErr: Error parsing analysis results. See output for details. ${parseError}`
+          );
+          outputChannel.appendLine(
+            `[analyzeCode] JSON parse error (realtime): ${parseError}`
           );
 
           const editor = vscode.window.activeTextEditor;
@@ -289,10 +364,14 @@ export function activate(context: vscode.ExtensionContext) {
 
   vscode.workspace.onDidChangeConfiguration((e) => {
     if (e.affectsConfiguration("findRuntimeErr")) {
+      outputChannel.appendLine(
+        "[onDidChangeConfiguration] Configuration changed."
+      );
       if (
         vscode.window.activeTextEditor &&
         vscode.window.activeTextEditor.document.languageId === "python"
       ) {
+        // 설정 변경 시 현재 열린 파일 다시 분석
         analyzeCode(
           vscode.window.activeTextEditor.document.getText(),
           vscode.window.activeTextEditor.document.uri
@@ -305,6 +384,9 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand("findRuntimeErr.analyzeCurrentFile", () => {
       const editor = vscode.window.activeTextEditor;
       if (editor && editor.document.languageId === "python") {
+        outputChannel.appendLine(
+          "[Command] findRuntimeErr.analyzeCurrentFile executed."
+        );
         analyzeCode(
           editor.document.getText(),
           editor.document.uri,
@@ -340,6 +422,9 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.window.activeTextEditor &&
     vscode.window.activeTextEditor.document.languageId === "python"
   ) {
+    outputChannel.appendLine(
+      "[Activate] Analyzing initially active Python file."
+    );
     analyzeCode(
       vscode.window.activeTextEditor.document.getText(),
       vscode.window.activeTextEditor.document.uri
