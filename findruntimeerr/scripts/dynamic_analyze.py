@@ -1,31 +1,150 @@
-# dynamic_analyze.py (개략적인 구조)
 import sys
 import json
-import pdb # 예시: Python 디버거 사용
-# from dynamic_checkers import check_race_condition, check_deadlock # 예시
+import traceback
+import astroid
+import os
+import requests
 
-def collect_runtime_info(code: str) -> dict:
-    """ 코드를 실행하고 런타임 정보를 수집합니다. (매우 복잡한 부분) """
-    runtime_data = {'variables': {}, 'call_stack': [], 'exceptions': []}
-    # pdb 또는 다른 도구를 사용하여 코드 실행 제어 및 정보 수집
-    # 예시: pdb.Pdb() 사용, 특정 지점에서 변수 값 기록, 예외 발생 시 기록 등
-    # 이 부분 구현이 동적 분석의 핵심이며 매우 복잡합니다.
-    print("Warning: Dynamic analysis runtime data collection is not implemented.", file=sys.stderr)
-    return runtime_data
+# Configuration for Gemini free API
+GEMINI_API_URL = "https://api.gemini.com/v1/generate"
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+
+def parse_functions(code: str):
+    """
+    AST를 사용해 코드에서 함수 정의를 추출하고, 각 함수의 코드, 주석, 의존성을 반환합니다.
+    """
+    module = astroid.parse(code)
+    functions = {}
+    for node in module.body:
+        if isinstance(node, astroid.FunctionDef):
+            name = node.name
+            # 함수 docstring 또는 주석 추출
+            comment = node.doc_node.value if node.doc_node else ""
+            func_code = node.as_string()
+            functions[name] = {"code": func_code, "comment": comment, "node": node}
+
+    # 각 함수가 호출하는 다른 사용자 함수 의존성 추출
+    deps = {}
+    for name, data in functions.items():
+        calls = []
+        for call in data["node"].nodes_of_class(astroid.Call):
+            if isinstance(call.func, astroid.Name) and call.func.name in functions:
+                calls.append(call.func.name)
+        deps[name] = sorted(set(calls))
+    return functions, deps
+
+def generate_test_cases(func_name, comment):
+    """
+    Gemini API를 이용해 함수별 10개의 테스트케이스 생성 요청.
+    """
+    if not GEMINI_API_KEY:
+        raise RuntimeError("GEMINI_API_KEY not set in environment")
+    prompt = (
+        f"Generate exactly 10 test cases for the Python function `{func_name}`.\n"
+        f"Description/comment: {comment}\n"
+        "Return a JSON array of objects with fields: `input` (list of args) and `expected`."
+    )
+    headers = {
+        "Authorization": f"Bearer {GEMINI_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "prompt": prompt,
+        "max_tokens": 512,
+        "n": 1
+    }
+    resp = requests.post(GEMINI_API_URL, headers=headers, json=payload, timeout=10)
+    resp.raise_for_status()
+    body = resp.json()
+    text = body.get("data", [{}])[0].get("generated_text", "")
+    try:
+        cases = json.loads(text)
+    except Exception:
+        # 파싱 실패 시 빈 리스트 반환
+        cases = []
+    return cases
+
+def execute_function_tests(func_code, func_name, test_cases):
+    """
+    단일 함수 정의(func_code)를 실행 환경에 로드하고, 각 테스트케이스를 호출해 결과 수집.
+    """
+    results = []
+    namespace = {}
+    # 함수 정의 로드
+    exec(func_code, namespace)
+    func = namespace.get(func_name)
+    for case in test_cases:
+        inp = case.get("input", [])
+        exp = case.get("expected")
+        try:
+            out = func(*inp)
+            success = out == exp
+            results.append({
+                "input": inp,
+                "expected": exp,
+                "output": out,
+                "success": success
+            })
+        except Exception as e:
+            results.append({
+                "input": inp,
+                "expected": exp,
+                "error": str(e),
+                "success": False
+            })
+    return results
 
 def analyze_dynamic_data(runtime_data: dict) -> list:
-    """ 수집된 런타임 데이터를 바탕으로 오류를 검사합니다. """
+    """
+    메인 진입점: 입력 코드에서 함수별로 테스트케이스 생성 및 실행,
+    의존성 고려하여 순차적으로 검사 후 오류 리스트 반환.
+    """
+    code = runtime_data.get("code", "")
+    functions, deps = parse_functions(code)
+
+    # 의존성 기반 토폴로지 정렬
+    tested = set()
+    order = []
+    def visit(fname):
+        if fname in tested:
+            return
+        for dep in deps.get(fname, []):
+            if dep not in tested:
+                visit(dep)
+        tested.add(fname)
+        order.append(fname)
+    for fname in functions:
+        visit(fname)
+
     errors = []
-    # check_race_condition(runtime_data, errors) # 예시
-    # check_deadlock(runtime_data, errors) # 예시
-    print("Warning: Dynamic checkers are not implemented.", file=sys.stderr)
+    for fname in order:
+        data = functions[fname]
+        cases = generate_test_cases(fname, data["comment"])
+        results = execute_function_tests(data["code"], fname, cases)
+        for r in results:
+            if not r["success"]:
+                msg = r.get("error") or f"Expected {r['expected']}, got {r.get('output')}"
+                errors.append({
+                    "message": f"Function `{fname}` failed on input {r['input']}: {msg}",
+                    "line": data["node"].lineno,
+                    "column": 0,
+                    "errorType": "DynamicTestFailure"
+                })
     return errors
 
-if __name__ == '__main__':
+if __name__ == "__main__":
+    # 전체 파일 코드 전달
     code = sys.stdin.read()
-    runtime_data = collect_runtime_info(code) # 1. 런타임 정보 수집
-    errors = analyze_dynamic_data(runtime_data) # 2. 수집된 정보로 오류 검사
-
-    # 결과를 JSON으로 출력
-    analysis_result = {"errors": errors, "call_graph": None} # 동적 분석은 호출 그래프 미생성
-    print(json.dumps(analysis_result))
+    runtime_data = {"code": code}
+    try:
+        errors = analyze_dynamic_data(runtime_data)
+    except Exception as e:
+        # 분석 자체 실패 시 단일 오류로 보고
+        tb = traceback.format_exc()
+        errors = [{
+            "message": f"Dynamic analysis error: {e}\\n{tb}",
+            "line": 0,
+            "column": 0,
+            "errorType": "AnalysisError"
+        }]
+    print(json.dumps({"errors": errors, "call_graph": None}))
