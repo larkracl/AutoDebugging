@@ -1,18 +1,18 @@
 // src/extension.ts
 import * as vscode from "vscode";
-import { spawn } from "child_process";
+import { spawn, SpawnOptionsWithoutStdio } from "child_process"; // SpawnOptionsWithoutStdio 추가
 import * as path from "path";
 import * as fs from "fs";
 import * as os from "os";
 
-const outputChannel = vscode.window.createOutputChannel("FindRuntimeErr");
+const outputChannel = vscode.window.createOutputChannel("FindRuntimeErr"); // 출력 채널
 
 interface ExtensionConfig {
   enable: boolean;
   severityLevel: vscode.DiagnosticSeverity;
-  enableDynamicAnalysis: boolean;
+  enableDynamicAnalysis: boolean; // (현재 미구현)
   ignoredErrorTypes: string[];
-  minAnalysisLength: number;
+  minAnalysisLength: number; // 최소 분석 길이 설정 추가
 }
 
 interface ErrorInfo {
@@ -22,6 +22,7 @@ interface ErrorInfo {
   errorType: string;
 }
 
+// networkx JSON 데이터 타입 (간단하게 any로 정의)
 interface CallGraphData {
   nodes: { id: string; type?: string; lineno?: number }[];
   links: {
@@ -30,12 +31,13 @@ interface CallGraphData {
     type?: string;
     call_sites?: number[];
   }[];
+  // 다른 networkx node_link_data 속성들 (directed, multigraph, graph)
   [key: string]: any;
 }
 
 interface AnalysisResult {
-  errors: ErrorInfo[];
-  call_graph: CallGraphData | null;
+  errors: ErrorInfo[]; // errors는 항상 배열이어야 함
+  call_graph: CallGraphData | null; // 호출 그래프 데이터 또는 null
 }
 
 export function activate(context: vscode.ExtensionContext) {
@@ -49,8 +51,9 @@ export function activate(context: vscode.ExtensionContext) {
     textDecoration: "underline wavy green",
   });
 
+  // --- Debouncing 설정 ---
   let debounceTimeout: NodeJS.Timeout | null = null;
-  const debounceDelay = 500;
+  const debounceDelay = 500; // ms (0.5초) - 이 값을 조절하여 반응성 조절
 
   function getConfiguration(): ExtensionConfig {
     const config = vscode.workspace.getConfiguration("findRuntimeErr");
@@ -80,29 +83,69 @@ export function activate(context: vscode.ExtensionContext) {
         false
       ),
       ignoredErrorTypes: config.get<string[]>("ignoredErrorTypes", []),
-      minAnalysisLength: config.get<number>("minAnalysisLength", 50),
+      minAnalysisLength: config.get<number>("minAnalysisLength", 50), // 설정값 읽기
     };
   }
 
+  // 분석 실행 함수 (Promise 반환) - cwd 옵션 추가
   function runAnalysisProcess(
     code: string,
     mode: "realtime" | "static"
   ): Promise<AnalysisResult> {
     return new Promise((resolve, reject) => {
-      const pythonExecutable = "python3";
-      const mainScriptPath = path.join(
-        context.extensionPath,
-        "scripts",
-        "main.py"
-      );
+      const extensionRootPath = context.extensionPath;
+      const scriptDir = path.join(extensionRootPath, "scripts"); // scripts 디렉토리 경로
+      const mainScriptPath = path.join(scriptDir, "main.py"); // main.py 전체 경로
+
+      // .venv 경로 설정 (이전과 동일)
+      let pythonExecutable =
+        process.platform === "win32"
+          ? path.join(extensionRootPath, ".venv", "Scripts", "python.exe")
+          : path.join(extensionRootPath, ".venv", "bin", "python");
+
+      // python 실행 파일 존재 확인 (이전과 동일)
+      if (!fs.existsSync(pythonExecutable)) {
+        const python3Executable =
+          process.platform === "win32"
+            ? path.join(extensionRootPath, ".venv", "Scripts", "python3.exe")
+            : path.join(extensionRootPath, ".venv", "bin", "python3");
+        if (fs.existsSync(python3Executable)) {
+          outputChannel.appendLine(
+            `[runAnalysis] python not found, trying python3: ${python3Executable}`
+          );
+          pythonExecutable = python3Executable; // python3 경로 사용
+        } else {
+          const errMsg = `Python interpreter not found in .venv: Checked ${pythonExecutable} and ${python3Executable}`;
+          outputChannel.appendLine(`[runAnalysis] Error: ${errMsg}`);
+          reject(new Error(errMsg));
+          return;
+        }
+      }
+      if (!fs.existsSync(mainScriptPath)) {
+        const errMsg = `main.py script not found at path: ${mainScriptPath}`;
+        outputChannel.appendLine(`[runAnalysis] Error: ${errMsg}`);
+        reject(new Error(errMsg));
+        return;
+      }
+
+      // --- spawn 옵션에 cwd 추가 ---
+      const spawnOptions: SpawnOptionsWithoutStdio = {
+        cwd: scriptDir, // 작업 디렉토리를 scripts 폴더로 설정
+      };
+
       outputChannel.appendLine(
-        `[runAnalysis] Spawning: ${pythonExecutable} ${mainScriptPath} ${mode}`
+        `[runAnalysis] Spawning: ${pythonExecutable} ${mainScriptPath} ${mode} in ${scriptDir}`
       );
-      const pythonProcess = spawn(pythonExecutable, [mainScriptPath, mode]);
+      const pythonProcess = spawn(
+        pythonExecutable,
+        [mainScriptPath, mode],
+        spawnOptions
+      ); // 옵션 전달
 
       let stdoutData = "";
       let stderrData = "";
 
+      // --- stdin, stdout, stderr, close, error 이벤트 핸들러 ---
       pythonProcess.stdin.write(code);
       pythonProcess.stdin.end();
 
@@ -131,7 +174,7 @@ export function activate(context: vscode.ExtensionContext) {
           if (stderrData.trim()) {
             errorDetail += `\nStderr: ${stderrData.trim()}`;
           }
-          reject(new Error(errorDetail)); // 오류 메시지와 함께 reject
+          reject(new Error(errorDetail));
           return;
         }
         try {
@@ -139,6 +182,9 @@ export function activate(context: vscode.ExtensionContext) {
             `[runAnalysis] Raw stdout (${mode}): ${stdoutData}`
           );
           if (!stdoutData.trim()) {
+            outputChannel.appendLine(
+              `[runAnalysis] Received empty stdout (${mode}).`
+            );
             resolve({ errors: [], call_graph: null });
             return;
           }
@@ -167,6 +213,7 @@ export function activate(context: vscode.ExtensionContext) {
     });
   }
 
+  // --- 분석 로직 (analyzeCode) ---
   async function analyzeCode(
     code: string,
     documentUri: vscode.Uri,
@@ -202,8 +249,8 @@ export function activate(context: vscode.ExtensionContext) {
         async (progress) => {
           try {
             progress.report({ message: "정적 분석 수행 중..." });
-            const result = await runAnalysisProcess(code, mode);
-            handleAnalysisResult(documentUri, config, result, mode);
+            const result = await runAnalysisProcess(code, mode); // await 사용
+            handleAnalysisResult(documentUri, config, result, mode); // 성공 결과 처리
             vscode.window.showInformationMessage(
               `FindRuntimeErr: 분석 완료. ${result.errors.length}개의 오류 발견.`
             );
@@ -222,6 +269,7 @@ export function activate(context: vscode.ExtensionContext) {
         }
       );
     } else {
+      // 실시간 분석 (Progress 없이)
       try {
         const result = await runAnalysisProcess(code, mode);
         handleAnalysisResult(documentUri, config, result, mode);
@@ -234,6 +282,7 @@ export function activate(context: vscode.ExtensionContext) {
     }
   }
 
+  // --- 결과 처리 및 표시 함수 (handleAnalysisResult, displayDiagnostics) ---
   function handleAnalysisResult(
     documentUri: vscode.Uri,
     config: ExtensionConfig,
@@ -245,13 +294,13 @@ export function activate(context: vscode.ExtensionContext) {
       outputChannel.appendLine(
         `[handleResult] Processing ${errors.length} errors.`
       );
-      displayDiagnostics(documentUri, config, errors);
+      displayDiagnostics(documentUri, config, errors); // 진단 정보 표시
 
       const callGraphData = result.call_graph;
       if (callGraphData && mode === "static") {
         outputChannel.appendLine(`[handleResult] Call graph data received:`);
         outputChannel.appendLine(JSON.stringify(callGraphData, null, 2)); // Output 채널에 JSON 출력
-        console.log("Call Graph Data:", callGraphData);
+        console.log("Call Graph Data:", callGraphData); // 디버그 콘솔에도 출력
         // TODO: 그래프 데이터 활용 로직
       }
     } catch (error: any) {
@@ -305,7 +354,6 @@ export function activate(context: vscode.ExtensionContext) {
         diagnostic.code = error.errorType;
         diagnostics.push(diagnostic);
 
-        // 밑줄 표시 조건: Error 또는 Warning
         if (
           finalSeverity === vscode.DiagnosticSeverity.Error ||
           finalSeverity === vscode.DiagnosticSeverity.Warning
