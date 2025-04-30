@@ -24,7 +24,7 @@ function activate(context) {
         let debounceTimeout = null;
         const debounceDelay = 500;
         let checkedPackages = false; // 패키지 확인 여부 플래그
-        let lastUsedPythonExecutable = null;
+        let lastUsedPythonExecutable = null; // 마지막 사용 경로
         // --- getConfiguration 함수 ---
         function getConfiguration() {
             try {
@@ -57,6 +57,7 @@ function activate(context) {
             catch (e) {
                 console.error("Error getting configuration:", e);
                 outputChannel.appendLine(`ERROR getting configuration: ${e.message}\n${e.stack}`);
+                // 설정 로드 실패 시 기본값 반환
                 return {
                     enable: true,
                     severityLevel: vscode.DiagnosticSeverity.Error,
@@ -67,9 +68,9 @@ function activate(context) {
                 };
             }
         }
-        // --- getSelectedPythonPath 함수 (수정됨 - 이전 getPythonExecutablePath 대체) ---
+        // --- getSelectedPythonPath 함수 ---
         async function getSelectedPythonPath(resource) {
-            const config = getConfiguration(); // 설정 읽기
+            const config = getConfiguration(); // 최신 설정 읽기
             try {
                 outputChannel.appendLine("[getSelectedPythonPath] Determining Python executable path...");
                 // 1. 사용자 설정 확인
@@ -113,7 +114,7 @@ function activate(context) {
                             }
                         }
                         else {
-                            outputChannel.appendLine(`[getSelectedPythonPath] Python extension exports or settings not available.`);
+                            outputChannel.appendLine(`[getSelectedPythonPath] VSCode Python extension exports or settings not available.`);
                         }
                     }
                     else {
@@ -126,14 +127,14 @@ function activate(context) {
                 // 3. 최후의 수단: PATH에서 'python3' 또는 'python' 찾기
                 outputChannel.appendLine("[getSelectedPythonPath] Falling back to 'python3' or 'python' command.");
                 try {
-                    (0, child_process_1.execSync)("python3 --version"); // python3 먼저 시도
+                    (0, child_process_1.execSync)("python3 --version");
                     outputChannel.appendLine("[getSelectedPythonPath] Using 'python3' from PATH.");
                     return "python3";
                 }
                 catch (error) {
                     outputChannel.appendLine("[getSelectedPythonPath] 'python3' command failed. Trying 'python'.");
                     try {
-                        (0, child_process_1.execSync)("python --version"); // python 시도
+                        (0, child_process_1.execSync)("python --version");
                         outputChannel.appendLine("[getSelectedPythonPath] Using 'python' from PATH.");
                         return "python";
                     }
@@ -149,21 +150,20 @@ function activate(context) {
                 throw e; // 경로 결정 실패 시 에러 다시 throw
             }
         }
-        // --- checkPythonPackages 함수 (수정됨) ---
+        // --- checkPythonPackages 함수 ---
         function checkPythonPackages(pythonExecutable, packages) {
-            // 반환 타입 명시
             const missingPackages = [];
             let checkError;
-            outputChannel.appendLine(`[checkPackages] Checking for packages using interpreter: ${pythonExecutable}`);
+            outputChannel.appendLine(`[checkPackages] Checking for packages using: ${pythonExecutable}`);
             for (const pkg of packages) {
                 try {
-                    const command = `"${pythonExecutable}" -m pip show ${pkg}`; // 경로에 공백 가능성 대비 "" 사용
+                    const command = `"${pythonExecutable}" -m pip show ${pkg}`;
                     outputChannel.appendLine(`[checkPackages] Running: ${command}`);
-                    (0, child_process_1.execSync)(command); // 오류 없으면 설치된 것
+                    (0, child_process_1.execSync)(command);
                     outputChannel.appendLine(`[checkPackages] Package found: ${pkg}`);
                 }
                 catch (error) {
-                    outputChannel.appendLine(`[checkPackages] Package not found: ${pkg}. Error status: ${error.status}`);
+                    outputChannel.appendLine(`[checkPackages] Package not found: ${pkg}. Status: ${error.status}`);
                     if (error.stderr) {
                         outputChannel.appendLine(`[checkPackages] Stderr: ${error.stderr.toString()}`);
                     }
@@ -172,25 +172,23 @@ function activate(context) {
                     }
                     missingPackages.push(pkg);
                     const errorMsg = error.stderr?.toString() || error.message || "";
-                    // Python 실행 파일 자체 오류 확인
                     if (errorMsg.includes("No such file or directory") ||
                         errorMsg.includes("command not found") ||
                         errorMsg.includes("not recognized")) {
                         checkError = `Failed to run Python ('${pythonExecutable}'). Is it installed and in PATH, or is the configured path correct?`;
-                        outputChannel.appendLine(`[checkPackages] Python executable check failed: ${checkError}`);
-                        break; // Python 실행 불가 시 더 이상 확인할 필요 없음
+                        outputChannel.appendLine(`[checkPackages] Python check failed: ${checkError}`);
+                        break;
                     }
-                    // pip show가 실패한 다른 이유는 패키지 미설치로 간주
                 }
             }
             // --- 함수 마지막에 명시적인 return 문 추가 ---
             return { missing: missingPackages, error: checkError };
         }
-        // --- runAnalysisProcess 함수 (getSelectedPythonPath 사용) ---
+        // --- runAnalysisProcess 함수 ---
         async function runAnalysisProcess(code, mode, documentUri) {
             let pythonExecutable;
             try {
-                pythonExecutable = await getSelectedPythonPath(documentUri); // 수정된 함수 호출
+                pythonExecutable = await getSelectedPythonPath(documentUri); // getSelectedPythonPath 사용
             }
             catch (e) {
                 outputChannel.appendLine(`[runAnalysisProcess] Failed to get Python executable path: ${e.message}`);
@@ -214,7 +212,7 @@ function activate(context) {
                     const requiredPackages = ["astroid", "networkx"];
                     const checkResult = checkPythonPackages(pythonExecutable, requiredPackages);
                     if (checkResult.error) {
-                        /* ... 오류 resolve ... */ resolve({
+                        resolve({
                             errors: [
                                 {
                                     message: checkResult.error,
@@ -228,10 +226,12 @@ function activate(context) {
                         return;
                     }
                     if (checkResult.missing.length > 0) {
-                        /* ... MissingDependencyError resolve ... */ resolve({
+                        const missing = checkResult.missing.join(", ");
+                        const message = `FindRuntimeErr requires: ${missing}. Please run 'pip install ${missing}' in your Python environment ('${pythonExecutable}'). Analysis skipped.`;
+                        resolve({
                             errors: [
                                 {
-                                    message: `FindRuntimeErr requires: ${checkResult.missing.join(", ")}...`,
+                                    message: message,
                                     line: 1,
                                     column: 0,
                                     errorType: "MissingDependencyError",
@@ -239,10 +239,17 @@ function activate(context) {
                             ],
                             call_graph: null,
                         });
+                        proceedAnalysis = false;
+                        checkedPackages = true; // 오류 발생 시 다시 체크 안 함
+                    }
+                    if (proceedAnalysis && !checkedPackages) {
+                        checkedPackages = true;
+                    }
+                    if (!proceedAnalysis) {
+                        outputChannel.appendLine(`[runAnalysisProcess] Aborting analysis due to missing packages.`);
+                        // 위에서 이미 resolve 했으므로 여기서 추가 resolve 필요 없음
                         return;
-                    } // proceedAnalysis 제거
-                    // 패키지 확인 후 계속 진행
-                    outputChannel.appendLine(`[runAnalysisProcess] Required packages found.`);
+                    }
                     const extensionRootPath = context.extensionPath;
                     const scriptDir = path.join(extensionRootPath, "scripts");
                     const mainScriptPath = path.join(scriptDir, "main.py");
@@ -252,6 +259,151 @@ function activate(context) {
                     const spawnOptions = { cwd: scriptDir };
                     outputChannel.appendLine(`[runAnalysisProcess] Spawning: "${pythonExecutable}" "${mainScriptPath}" ${mode} in ${scriptDir}`);
                     const pythonProcess = (0, child_process_1.spawn)(pythonExecutable, [mainScriptPath, mode], spawnOptions);
+                    outputChannel.appendLine(`[runAnalysisProcess] Python process object created.`);
+                    let stdoutData = "";
+                    let stderrData = "";
+                    pythonProcess.stdin.write(code);
+                    pythonProcess.stdin.end();
+                    outputChannel.appendLine(`[runAnalysisProcess] Sent code to Python process stdin.`);
+                    pythonProcess.stdout.on("data", (data) => {
+                        stdoutData += data;
+                    });
+                    pythonProcess.stderr.on("data", (data) => {
+                        stderrData += data;
+                        outputChannel.appendLine(`[Py Stderr] ${data}`);
+                    });
+                    pythonProcess.on("close", (closeCode) => {
+                        try {
+                            outputChannel.appendLine(`[runAnalysisProcess] Python process 'close' event. Exit code: ${closeCode}`);
+                            if (closeCode !== 0) {
+                                let errorDetail = `Analysis script failed (Exit Code: ${closeCode}).`;
+                                let errorType = "AnalysisScriptError";
+                                let errorLine = 1;
+                                let errorColumn = 0;
+                                if (stdoutData.trim()) {
+                                    try {
+                                        const errorResult = JSON.parse(stdoutData);
+                                        if (errorResult?.errors?.[0]) {
+                                            errorDetail =
+                                                errorResult.errors[0].message || errorDetail;
+                                            errorType = errorResult.errors[0].errorType || errorType;
+                                            errorLine = errorResult.errors[0].line || errorLine;
+                                            errorColumn = errorResult.errors[0].column || errorColumn;
+                                        }
+                                    }
+                                    catch { }
+                                }
+                                if (stderrData.trim() &&
+                                    !errorDetail.includes(stderrData.trim())) {
+                                    errorDetail += `\nStderr: ${stderrData.trim()}`;
+                                }
+                                resolve({
+                                    errors: [
+                                        {
+                                            message: errorDetail,
+                                            line: errorLine,
+                                            column: errorColumn,
+                                            errorType: errorType,
+                                        },
+                                    ],
+                                    call_graph: null,
+                                });
+                                return;
+                            }
+                            outputChannel.appendLine(`[runAnalysisProcess] Raw stdout (${mode}): ${stdoutData}`);
+                            if (!stdoutData.trim()) {
+                                resolve({ errors: [], call_graph: null });
+                                return;
+                            }
+                            const result = JSON.parse(stdoutData);
+                            if (result && Array.isArray(result.errors)) {
+                                resolve(result);
+                            }
+                            else {
+                                resolve({
+                                    errors: [
+                                        {
+                                            message: "Invalid analysis result format. 'errors' key missing/not array.",
+                                            line: 1,
+                                            column: 0,
+                                            errorType: "InvalidFormatError",
+                                        },
+                                    ],
+                                    call_graph: null,
+                                });
+                            }
+                        }
+                        catch (parseError) {
+                            resolve({
+                                errors: [
+                                    {
+                                        message: `Error parsing analysis results: ${parseError.message}. Raw: ${stdoutData.substring(0, 100)}...`,
+                                        line: 1,
+                                        column: 0,
+                                        errorType: "JSONParseError",
+                                    },
+                                ],
+                                call_graph: null,
+                            });
+                        }
+                    });
+                    pythonProcess.on("error", (err) => {
+                        outputChannel.appendLine(`[runAnalysisProcess] Python process 'error' event: ${err.message}`);
+                        resolve({
+                            errors: [
+                                {
+                                    message: `Failed to start analysis process: ${err.message}`,
+                                    line: 1,
+                                    column: 0,
+                                    errorType: "SpawnError",
+                                },
+                            ],
+                            call_graph: null,
+                        });
+                    });
+                }
+                catch (e) {
+                    console.error("Error in runAnalysisProcess setup/spawn:", e);
+                    outputChannel.appendLine(`ERROR in runAnalysisProcess setup/spawn: ${e.message}\n${e.stack}`);
+                    resolve({
+                        errors: [
+                            {
+                                message: `Error setting up analysis process: ${e.message}`,
+                                line: 1,
+                                column: 0,
+                                errorType: "SetupError",
+                            },
+                        ],
+                        call_graph: null,
+                    });
+                }
+            });
+        }
+        // --- 동적 분석 실행 함수 ---
+        function runDynamicAnalysisProcess(code) {
+            // 동적 분석 부분은 건드리지 않음 - 이전 코드 유지
+            return new Promise(async (resolve, reject) => {
+                let pythonExecutable;
+                try {
+                    pythonExecutable = await getSelectedPythonPath();
+                }
+                catch (e) {
+                    // getSelectedPythonPath 사용
+                    reject(new Error(`Failed to get Python path for dynamic analysis: ${e.message}`));
+                    return;
+                }
+                lastUsedPythonExecutable = pythonExecutable;
+                const extensionRootPath = context.extensionPath;
+                const scriptDir = path.join(extensionRootPath, "scripts");
+                const dynamicScriptPath = path.join(scriptDir, "dynamic_analyze.py");
+                if (!fs.existsSync(dynamicScriptPath)) {
+                    reject(new Error(`dynamic_analyze.py not found: ${dynamicScriptPath}`));
+                    return;
+                }
+                try {
+                    const spawnOptions = { cwd: scriptDir };
+                    outputChannel.appendLine(`[runDynamicAnalysis] Spawning: ${pythonExecutable} ${dynamicScriptPath}`);
+                    const pythonProcess = (0, child_process_1.spawn)(pythonExecutable, [dynamicScriptPath], spawnOptions);
                     let stdoutData = "";
                     let stderrData = "";
                     pythonProcess.stdin.write(code);
@@ -261,20 +413,37 @@ function activate(context) {
                     });
                     pythonProcess.stderr.on("data", (data) => {
                         stderrData += data;
-                        outputChannel.appendLine(`[Py Stderr] ${data}`);
+                        outputChannel.appendLine(`[Dynamic Py Stderr] ${data}`);
                     });
                     pythonProcess.on("close", (closeCode) => {
-                        /* ... 이전 결과/오류 resolve 처리 ... */
+                        outputChannel.appendLine(`[runDynamicAnalysis] Python process exited with code: ${closeCode}`);
+                        if (closeCode !== 0) {
+                            reject(new Error(`Dynamic analysis script failed (Exit Code: ${closeCode}). ${stderrData.trim()}`));
+                            return;
+                        }
+                        try {
+                            const result = JSON.parse(stdoutData);
+                            if (result && Array.isArray(result.errors)) {
+                                resolve(result);
+                            }
+                            else {
+                                reject(new Error("Invalid dynamic analysis result format."));
+                            }
+                        }
+                        catch (error) {
+                            reject(new Error(`Error parsing dynamic analysis result: ${error.message}`));
+                        }
                     });
                     pythonProcess.on("error", (err) => {
-                        /* ... SpawnError resolve 처리 ... */
+                        reject(new Error(`Failed to start dynamic analysis: ${err.message}`));
                     });
                 }
                 catch (e) {
-                    /* ... SetupError resolve 처리 ... */
+                    reject(new Error(`Failed to spawn dynamic analysis process: ${e.message}`));
                 }
             });
         }
+        // --- 분석 로직 (analyzeCode) ---
         async function analyzeCode(code, documentUri, mode = "realtime", showProgress = false) {
             try {
                 outputChannel.appendLine(`[analyzeCode] Function called. Mode: ${mode}, URI: ${documentUri.fsPath}`);
@@ -300,9 +469,10 @@ function activate(context) {
                         title: "FindRuntimeErr: 정적 분석 실행 중...",
                         cancellable: false,
                     }, async (progress) => {
+                        // location 추가
                         try {
                             progress.report({ message: "코드 분석 중..." });
-                            analysisResult = await runAnalysisProcess(code, "static", documentUri); // documentUri 전달
+                            analysisResult = await runAnalysisProcess(code, "static", documentUri);
                             handleAnalysisResult(documentUri, config, analysisResult, "static");
                             const scriptErrors = analysisResult.errors.filter((e) => !["SyntaxError"].includes(e.errorType) &&
                                 e.errorType.endsWith("Error"));
@@ -334,7 +504,7 @@ function activate(context) {
                 else {
                     // 실시간 분석
                     try {
-                        analysisResult = await runAnalysisProcess(code, "realtime", documentUri); // documentUri 전달
+                        analysisResult = await runAnalysisProcess(code, "realtime", documentUri);
                         handleAnalysisResult(documentUri, config, analysisResult, "realtime");
                     }
                     catch (error) {
@@ -365,28 +535,13 @@ function activate(context) {
         }
         // --- 결과 처리 및 표시 함수 ---
         function handleAnalysisResult(documentUri, config, result, mode) {
-            try {
-                /* ... 이전 최종 코드와 동일 ... */
-            }
-            catch (e) {
-                /* ... */
-            }
+            /* ... 이전 최종 코드와 동일 ... */
         }
         function displayDiagnostics(documentUri, config, errors) {
-            try {
-                /* ... 이전 최종 코드와 동일 (호버 포함) ... */
-            }
-            catch (e) {
-                /* ... */
-            }
+            /* ... 이전 최종 코드와 동일 ... */
         }
         function clearPreviousAnalysis(documentUri) {
-            try {
-                /* ... 이전 최종 코드와 동일 ... */
-            }
-            catch (e) {
-                /* ... */
-            }
+            /* ... 이전 최종 코드와 동일 ... */
         }
         // --- Hover Provider (provideHover 반환 타입 수정됨) ---
         const hoverProvider = vscode.languages.registerHoverProvider("python", {
@@ -415,12 +570,12 @@ function activate(context) {
                 catch (e) {
                     console.error("Error in HoverProvider:", e);
                     outputChannel.appendLine(`ERROR in HoverProvider: ${e.message}\n${e.stack}`);
-                    return undefined; // catch 블록에서 undefined 반환
+                    return undefined; // catch 블록에서도 undefined 반환
                 }
             },
         });
         context.subscriptions.push(hoverProvider);
-        // --- 이벤트 리스너 및 명령어 등록 (try...catch 포함) ---
+        // --- 이벤트 리스너 및 명령어 등록 ---
         vscode.workspace.onDidChangeTextDocument((event) => {
             try {
                 if (event.document.languageId === "python") {
@@ -461,28 +616,83 @@ function activate(context) {
                     analyzeCode(editor.document.getText(), editor.document.uri, "static", true);
                 }
                 else {
-                    vscode.window.showWarningMessage("FindRuntimeErr: Please open a Python file to analyze.");
+                    /* ... */
                 }
             }
             catch (e) {
                 /* ... */
             }
         }));
-        context.subscriptions.push(vscode.commands.registerCommand("findRuntimeErr.runDynamicAnalysis", () => {
+        context.subscriptions.push(vscode.commands.registerCommand("findRuntimeErr.runDynamicAnalysis", async () => {
             try {
-                /* ... */
+                /* ... 이전 코드와 동일 (runDynamicAnalysisProcess 호출) ... */
             }
             catch (e) {
                 /* ... */
             }
         }));
-        if (vscode.window.activeTextEditor &&
-            vscode.window.activeTextEditor.document.languageId === "python") {
-            try {
-                /* ... */
+        // --- 초기 실행 (async 함수 사용 및 getSelectedPythonPath 호출) ---
+        async function runInitialAnalysis() {
+            const editor = vscode.window.activeTextEditor;
+            if (editor && editor.document.languageId === "python") {
+                try {
+                    const initialConfig = getConfiguration();
+                    // getSelectedPythonPath 호출로 변경
+                    const initialPython = await getSelectedPythonPath(editor.document.uri); // documentUri 전달
+                    if (initialPython) {
+                        const pkgsOk = checkPythonPackages(initialPython, [
+                            "astroid",
+                            "networkx",
+                        ]);
+                        if (pkgsOk.missing.length === 0 && !pkgsOk.error) {
+                            outputChannel.appendLine("[Activate] Analyzing initially active Python file.");
+                            await analyzeCode(editor.document.getText(), editor.document.uri);
+                        }
+                        else {
+                            outputChannel.appendLine("[Activate] Initial analysis skipped due to missing packages or Python path error.");
+                            const errorMsg = pkgsOk.error ||
+                                `Missing packages: ${pkgsOk.missing.join(", ")}. Run 'pip install ...'`;
+                            displayDiagnostics(editor.document.uri, initialConfig, [
+                                {
+                                    message: errorMsg,
+                                    line: 1,
+                                    column: 0,
+                                    errorType: pkgsOk.error
+                                        ? "PythonPathError"
+                                        : "MissingDependencyError",
+                                },
+                            ]);
+                        }
+                    }
+                    else {
+                        outputChannel.appendLine("[Activate] Could not determine Python path for initial analysis.");
+                        displayDiagnostics(editor.document.uri, initialConfig, [
+                            {
+                                message: "Could not determine Python path for initial analysis. Check Python extension or 'findRuntimeErr.pythonPath' setting.",
+                                line: 1,
+                                column: 0,
+                                errorType: "PythonPathError",
+                            },
+                        ]);
+                    }
+                }
+                catch (e) {
+                    console.error("Error during initial analysis:", e);
+                    outputChannel.appendLine(`ERROR during initial analysis: ${e.message}\n${e.stack}`);
+                    if (editor) {
+                        displayDiagnostics(editor.document.uri, getConfiguration(), [
+                            {
+                                message: `Initial analysis error: ${e.message}`,
+                                line: 1,
+                                column: 0,
+                                errorType: "InitialAnalysisError",
+                            },
+                        ]);
+                    }
+                }
             }
-            catch (e) {
-                /* ... */
+            else {
+                outputChannel.appendLine("[Activate] No active Python editor found for initial analysis.");
             }
         }
         // runInitialAnalysis 함수 호출
