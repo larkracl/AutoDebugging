@@ -2,7 +2,7 @@
 import astroid
 import os
 import sys
-from typing import List, Dict, Any, Set
+from typing import List, Dict, Any, Set, Union
 from utils import get_type, is_compatible
 
 class BaseChecker:

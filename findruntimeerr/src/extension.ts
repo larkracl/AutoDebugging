@@ -1,11 +1,9 @@
 // src/extension.ts
 import * as vscode from "vscode";
-import { spawn, SpawnOptionsWithoutStdio } from "child_process";
+import { spawn, SpawnOptionsWithoutStdio, execSync } from "child_process";
 import * as path from "path";
 import * as fs from "fs";
 import * as os from "os";
-
-const outputChannel = vscode.window.createOutputChannel("FindRuntimeErr");
 
 // --- 인터페이스 정의 ---
 interface ExtensionConfig {
@@ -14,34 +12,28 @@ interface ExtensionConfig {
   enableDynamicAnalysis: boolean;
   ignoredErrorTypes: string[];
   minAnalysisLength: number;
+  pythonPath: string | null;
 }
-
 interface ErrorInfo {
   message: string;
   line: number;
   column: number;
   errorType: string;
 }
-
 interface CallGraphData {
-  nodes: { id: string; type?: string; lineno?: number }[];
-  links: {
-    source: string;
-    target: string;
-    type?: string;
-    call_sites?: number[];
-  }[];
-  [key: string]: any;
-}
-
+  /* ... */
+} // 이전과 동일하게 정의
 interface AnalysisResult {
   errors: ErrorInfo[];
   call_graph: CallGraphData | null;
 }
 
+let outputChannel: vscode.OutputChannel; // activate 함수 내에서 생성하도록 변경
+
 export function activate(context: vscode.ExtensionContext) {
+  // --- activate 함수 시작 부분에서 try...catch 시작 ---
   try {
-    // --- activate 함수 전체 try...catch ---
+    outputChannel = vscode.window.createOutputChannel("FindRuntimeErr"); // 여기서 생성
     outputChannel.appendLine(
       "FindRuntimeErr 확장 프로그램이 활성화되었습니다."
     );
@@ -57,13 +49,13 @@ export function activate(context: vscode.ExtensionContext) {
     let debounceTimeout: NodeJS.Timeout | null = null;
     const debounceDelay = 500;
 
+    // --- getConfiguration 함수 ---
     function getConfiguration(): ExtensionConfig {
       try {
-        // getConfiguration 내부 try...catch (선택적)
         const config = vscode.workspace.getConfiguration("findRuntimeErr");
         const severityLevel = config.get<string>("severityLevel", "error");
         let diagnosticSeverity: vscode.DiagnosticSeverity;
-        switch (severityLevel) {
+        switch (severityLevel /* ... */) {
           case "warning":
             diagnosticSeverity = vscode.DiagnosticSeverity.Warning;
             break;
@@ -86,74 +78,189 @@ export function activate(context: vscode.ExtensionContext) {
           ),
           ignoredErrorTypes: config.get<string[]>("ignoredErrorTypes", []),
           minAnalysisLength: config.get<number>("minAnalysisLength", 50),
+          pythonPath: config.get<string | null>("pythonPath", null),
         };
       } catch (e: any) {
         console.error("Error getting configuration:", e);
         outputChannel.appendLine(
           `ERROR getting configuration: ${e.message}\n${e.stack}`
         );
-        // 기본값 반환 또는 에러 throw
         return {
-          // 기본값 반환 예시
           enable: true,
           severityLevel: vscode.DiagnosticSeverity.Error,
           enableDynamicAnalysis: false,
           ignoredErrorTypes: [],
           minAnalysisLength: 50,
+          pythonPath: null,
         };
       }
     }
 
-    // 분석 실행 함수 (Promise 반환)
-    function runAnalysisProcess(
+    // --- getPythonExecutablePath 함수 ---
+    async function getPythonExecutablePath(
+      context: vscode.ExtensionContext,
+      config: ExtensionConfig
+    ): Promise<string> {
+      // ... (이전 답변과 동일) ...
+      if (config.pythonPath && fs.existsSync(config.pythonPath)) {
+        return config.pythonPath;
+      }
+      const isDevContainer =
+        !!process.env.VSCODE_REMOTE_CONTAINERS_SESSION ||
+        !!process.env.CODESPACES ||
+        context.extensionMode === vscode.ExtensionMode.Development;
+      if (isDevContainer) {
+        const containerPythons = [
+          "/usr/bin/python3",
+          "/usr/local/bin/python3",
+          "/bin/python3",
+          "/usr/bin/python",
+        ];
+        for (const pyPath of containerPythons) {
+          try {
+            execSync(`${pyPath} --version`);
+            return pyPath;
+          } catch (error) {}
+        }
+        return "python3";
+      } else {
+        try {
+          const pythonExtension =
+            vscode.extensions.getExtension("ms-python.python");
+          if (pythonExtension) {
+            if (!pythonExtension.isActive) {
+              await pythonExtension.activate();
+            }
+            if (pythonExtension.exports && pythonExtension.exports.settings) {
+              const resourceUri =
+                vscode.window.activeTextEditor?.document.uri ||
+                vscode.workspace.workspaceFolders?.[0]?.uri;
+              const executionDetails =
+                pythonExtension.exports.settings.getExecutionDetails(
+                  resourceUri
+                );
+              if (executionDetails?.execCommand?.[0]) {
+                const vscodePythonPath = executionDetails.execCommand[0];
+                try {
+                  execSync(`${vscodePythonPath} --version`);
+                  return vscodePythonPath;
+                } catch (error) {}
+              }
+            }
+          }
+        } catch (err: any) {}
+        return "python3";
+      }
+    }
+
+    // --- checkPythonPackages 함수 ---
+    function checkPythonPackages(
+      pythonExecutable: string,
+      packages: string[]
+    ): { missing: string[]; error?: string } {
+      // ... (이전 답변과 동일) ...
+      const missingPackages: string[] = [];
+      let checkError: string | undefined;
+      for (const pkg of packages) {
+        try {
+          const command = `${pythonExecutable} -m pip show ${pkg}`;
+          execSync(command);
+        } catch (error: any) {
+          outputChannel.appendLine(
+            `[checkPackages] Package not found: ${pkg}. Error status: ${error.status}`
+          );
+          missingPackages.push(pkg);
+          const errorMsg = error.stderr?.toString() || error.message || "";
+          if (
+            errorMsg.includes("No such file or directory") ||
+            errorMsg.includes("command not found")
+          ) {
+            checkError = `Failed to run Python ('${pythonExecutable}'). Is it installed and in PATH?`;
+            break;
+          }
+        }
+      }
+      return { missing: missingPackages, error: checkError };
+    }
+
+    // --- runAnalysisProcess 함수 ---
+    async function runAnalysisProcess(
       code: string,
       mode: "realtime" | "static"
     ): Promise<AnalysisResult> {
+      // ... (이전 답변과 동일 - try...catch로 감싸고, 오류 시 resolve로 변경) ...
+      const config = getConfiguration();
+      const pythonExecutable = await getPythonExecutablePath(context, config);
+      lastUsedPythonExecutable = pythonExecutable; // 마지막 사용 경로 업데이트
+
       return new Promise((resolve, reject) => {
+        // reject는 이제 거의 사용 안 함
         try {
-          // runAnalysisProcess 내부 try...catch (spawn 전)
+          if (!checkedPackages) {
+            // 패키지 확인
+            const requiredPackages = ["astroid", "networkx"];
+            const checkResult = checkPythonPackages(
+              pythonExecutable,
+              requiredPackages
+            );
+            if (checkResult.error) {
+              resolve({
+                errors: [
+                  {
+                    message: checkResult.error,
+                    line: 1,
+                    column: 0,
+                    errorType: "PythonPathError",
+                  },
+                ],
+                call_graph: null,
+              });
+              return;
+            }
+            if (checkResult.missing.length > 0) {
+              const missing = checkResult.missing.join(", ");
+              const message = `FindRuntimeErr requires: ${missing}. Please run 'pip install ${missing}' in your Python environment ('${pythonExecutable}'). Analysis skipped.`;
+              // resolve로 오류 전달
+              resolve({
+                errors: [
+                  {
+                    message: message,
+                    line: 1,
+                    column: 0,
+                    errorType: "MissingDependencyError",
+                  },
+                ],
+                call_graph: null,
+              });
+              checkedPackages = true; // 한 번만 경고/오류 표시
+              return;
+            }
+            checkedPackages = true;
+          }
+
           const extensionRootPath = context.extensionPath;
           const scriptDir = path.join(extensionRootPath, "scripts");
           const mainScriptPath = path.join(scriptDir, "main.py");
-          let pythonExecutable =
-            process.platform === "win32"
-              ? path.join(extensionRootPath, ".venv", "Scripts", "python.exe")
-              : path.join(extensionRootPath, ".venv", "bin", "python");
 
-          if (!fs.existsSync(pythonExecutable)) {
-            const python3Executable =
-              process.platform === "win32"
-                ? path.join(
-                    extensionRootPath,
-                    ".venv",
-                    "Scripts",
-                    "python3.exe"
-                  )
-                : path.join(extensionRootPath, ".venv", "bin", "python3");
-            if (fs.existsSync(python3Executable)) {
-              pythonExecutable = python3Executable;
-            } else {
-              throw new Error(
-                `Python interpreter not found in .venv: Checked ${pythonExecutable} and ${python3Executable}`
-              );
-            } // 에러 throw
-          }
           if (!fs.existsSync(mainScriptPath)) {
             throw new Error(
               `main.py script not found at path: ${mainScriptPath}`
             );
-          } // 에러 throw
+          }
 
-          const spawnOptions: SpawnOptionsWithoutStdio = { cwd: scriptDir };
+          const spawnOptions: SpawnOptionsWithoutStdio = {
+            // cwd: scriptDir,
+            env: { ...process.env, PYTHONPATH: scriptDir },
+          };
           outputChannel.appendLine(
             `[runAnalysis] Spawning: ${pythonExecutable} ${mainScriptPath} ${mode} in ${scriptDir}`
           );
-          const pythonProcess = spawn(
-            pythonExecutable,
-            [mainScriptPath, mode],
-            spawnOptions
-          );
-
+          const pythonProcess = spawn(pythonExecutable, [mainScriptPath, mode]);
+          // const pythonProcess = spawn(
+          //   pythonExecutable,
+          //   [mainScriptPath, mode],
+          //   spawnOptions
+          // );
           let stdoutData = "";
           let stderrData = "";
 
@@ -169,7 +276,6 @@ export function activate(context: vscode.ExtensionContext) {
 
           pythonProcess.on("close", (closeCode) => {
             try {
-              // close 핸들러 내부 try...catch
               outputChannel.appendLine(
                 `[runAnalysis] Python process finished with code: ${closeCode} (${mode})`
               );
@@ -209,7 +315,6 @@ export function activate(context: vscode.ExtensionContext) {
                 });
                 return;
               }
-              // 성공 시
               outputChannel.appendLine(
                 `[runAnalysis] Raw stdout (${mode}): ${stdoutData}`
               );
@@ -225,7 +330,7 @@ export function activate(context: vscode.ExtensionContext) {
                   errors: [
                     {
                       message:
-                        "Invalid analysis result format. 'errors' key is missing or not an array.",
+                        "Invalid analysis result format. 'errors' key missing/not array.",
                       line: 1,
                       column: 0,
                       errorType: "InvalidFormatError",
@@ -233,24 +338,23 @@ export function activate(context: vscode.ExtensionContext) {
                   ],
                   call_graph: null,
                 });
-              } // reject 대신 오류 정보 resolve
+              }
             } catch (parseError: any) {
               resolve({
                 errors: [
                   {
                     message: `Error parsing analysis results: ${
                       parseError.message
-                    }. Raw data: ${stdoutData.substring(0, 100)}...`,
+                    }. Raw: ${stdoutData.substring(0, 100)}...`,
                     line: 1,
                     column: 0,
                     errorType: "JSONParseError",
                   },
                 ],
                 call_graph: null,
-              }); // reject 대신 오류 정보 resolve
+              });
             }
           });
-
           pythonProcess.on("error", (err) => {
             resolve({
               errors: [
@@ -262,13 +366,13 @@ export function activate(context: vscode.ExtensionContext) {
                 },
               ],
               call_graph: null,
-            }); // reject 대신 오류 정보 resolve
+            });
           });
         } catch (e: any) {
-          // spawn 전 오류 처리
-          console.error("Error before spawning Python process:", e);
+          // spawn 전 오류
+          console.error("Error setting up analysis process:", e);
           outputChannel.appendLine(
-            `ERROR before spawning Python: ${e.message}\n${e.stack}`
+            `ERROR setting up analysis process: ${e.message}\n${e.stack}`
           );
           resolve({
             errors: [
@@ -280,7 +384,7 @@ export function activate(context: vscode.ExtensionContext) {
               },
             ],
             call_graph: null,
-          }); // 오류 정보 resolve
+          });
         }
       });
     }
@@ -326,17 +430,17 @@ export function activate(context: vscode.ExtensionContext) {
             },
             async (progress) => {
               try {
-                // withProgress 내부 try...catch
                 progress.report({ message: "정적 분석 수행 중..." });
-                analysisResult = await runAnalysisProcess(code, mode); // 결과 또는 오류 받기
+                analysisResult = await runAnalysisProcess(code, mode); // await runAnalysisProcess
                 handleAnalysisResult(documentUri, config, analysisResult, mode);
-                if (
-                  analysisResult.errors.some((e) =>
-                    e.errorType.endsWith("Error")
-                  )
-                ) {
-                  outputChannel.appendLine(
-                    `[analyzeCode] Analysis completed with errors (${mode}).`
+                const scriptErrors = analysisResult.errors.filter(
+                  (e) =>
+                    e.errorType.endsWith("Error") &&
+                    e.errorType !== "SyntaxError"
+                );
+                if (scriptErrors.length > 0) {
+                  vscode.window.showWarningMessage(
+                    `FindRuntimeErr: 분석 중 문제 발생 (${scriptErrors[0].errorType}). Problems 패널 확인.`
                   );
                 } else {
                   vscode.window.showInformationMessage(
@@ -347,28 +451,25 @@ export function activate(context: vscode.ExtensionContext) {
                   `[analyzeCode] Analysis processed (${mode}). ${analysisResult.errors.length} potential issues found.`
                 );
               } catch (error: any) {
-                // runAnalysisProcess에서 reject된 경우 (거의 발생 안 함) 또는 withProgress 오류
-                console.error(
-                  "Unexpected error during analysis progress:",
-                  error
-                );
+                // runAnalysisProcess가 reject 한 경우 등
+                console.error("Analysis failed during progress:", error);
                 vscode.window.showErrorMessage(
-                  `FindRuntimeErr: 예상치 못한 분석 오류 발생. ${error.message}`
+                  `FindRuntimeErr: 분석 실패. ${error.message}`
                 );
                 outputChannel.appendLine(
-                  `[analyzeCode] Unexpected analysis error during progress (${mode}): ${error.message}`
+                  `[analyzeCode] Analysis failed during progress (${mode}): ${error.message}`
                 );
-                // 오류 발생 시에도 Problems 패널에 표시 시도
+                // 실패 시 Problems 패널에 표시
                 handleAnalysisResult(
                   documentUri,
                   config,
                   {
                     errors: [
                       {
-                        message: `Unexpected analysis error: ${error.message}`,
+                        message: `Analysis failed: ${error.message}`,
                         line: 1,
                         column: 0,
-                        errorType: "UnexpectedError",
+                        errorType: "ProcessExecutionError",
                       },
                     ],
                     call_graph: null,
@@ -379,18 +480,17 @@ export function activate(context: vscode.ExtensionContext) {
             }
           );
         } else {
-          // 실시간 분석 (Progress 없이)
+          // 실시간 분석
           try {
-            // 실시간 분석 try...catch
             analysisResult = await runAnalysisProcess(code, mode);
             handleAnalysisResult(documentUri, config, analysisResult, mode);
           } catch (error: any) {
-            // runAnalysisProcess에서 reject된 경우
-            console.error("Real-time analysis process failed:", error);
+            // runAnalysisProcess가 reject 한 경우
+            console.error("Real-time analysis failed:", error);
             outputChannel.appendLine(
               `[analyzeCode] Real-time analysis failed: ${error.message}`
             );
-            // 실시간 분석 실패 시에도 Problems 패널에 표시 시도
+            // 실시간 분석 실패 시 Problems 패널에 표시
             handleAnalysisResult(
               documentUri,
               config,
@@ -410,8 +510,7 @@ export function activate(context: vscode.ExtensionContext) {
           }
         }
       } catch (e: any) {
-        // analyzeCode 자체 오류
-        console.error("Error in analyzeCode function:", e);
+        console.error("Error in analyzeCode:", e);
         outputChannel.appendLine(
           `ERROR in analyzeCode: ${e.message}\n${e.stack}`
         );
@@ -426,7 +525,6 @@ export function activate(context: vscode.ExtensionContext) {
       mode: string
     ) {
       try {
-        // handleAnalysisResult 내부 try...catch
         const errors: ErrorInfo[] = result.errors || [];
         outputChannel.appendLine(
           `[handleResult] Processing ${errors.length} diagnostics/errors.`
@@ -448,7 +546,6 @@ export function activate(context: vscode.ExtensionContext) {
         outputChannel.appendLine(
           `ERROR handling analysis result: ${e.message}\n${e.stack}`
         );
-        // 추가적인 오류 표시
         const diagnostic = new vscode.Diagnostic(
           new vscode.Range(0, 0, 0, 0),
           `Internal Error handling results: ${e.message}`,
@@ -465,7 +562,6 @@ export function activate(context: vscode.ExtensionContext) {
       errors: ErrorInfo[]
     ) {
       try {
-        // displayDiagnostics 내부 try...catch
         outputChannel.appendLine(
           `[displayDiagnostics] Displaying ${errors.length} diagnostics.`
         );
@@ -500,6 +596,9 @@ export function activate(context: vscode.ExtensionContext) {
             "CoreAnalysisError",
             "SetupError",
             "AnalysisErrorRT",
+            "MissingDependencyError",
+            "ProcessExecutionError",
+            "PythonPathError",
           ].includes(error.errorType);
           const severity = isInternalError
             ? vscode.DiagnosticSeverity.Error
@@ -519,7 +618,7 @@ export function activate(context: vscode.ExtensionContext) {
           const line = Math.max(0, error.line - 1);
           const column = Math.max(0, error.column);
           const range = isInternalError
-            ? new vscode.Range(0, 0, 0, 0)
+            ? new vscode.Range(0, 0, 0, 1)
             : new vscode.Range(
                 line,
                 column,
@@ -540,8 +639,9 @@ export function activate(context: vscode.ExtensionContext) {
           diagnostics.push(diagnostic);
 
           if (
-            finalSeverity === vscode.DiagnosticSeverity.Error ||
-            finalSeverity === vscode.DiagnosticSeverity.Warning
+            !isInternalError &&
+            (finalSeverity === vscode.DiagnosticSeverity.Error ||
+              finalSeverity === vscode.DiagnosticSeverity.Warning)
           ) {
             decorationRanges.push(range);
           }
@@ -569,7 +669,6 @@ export function activate(context: vscode.ExtensionContext) {
 
     function clearPreviousAnalysis(documentUri: vscode.Uri) {
       try {
-        // clearPreviousAnalysis 내부 try...catch
         diagnosticCollection.delete(documentUri);
         const editor = vscode.window.activeTextEditor;
         if (
@@ -632,6 +731,11 @@ export function activate(context: vscode.ExtensionContext) {
       try {
         outputChannel.appendLine("[onDidChangeConfiguration] Event fired.");
         if (e.affectsConfiguration("findRuntimeErr")) {
+          // 설정 변경 시 패키지 체크 플래그 리셋
+          letcheckedPackages = false;
+          outputChannel.appendLine(
+            "[onDidChangeConfiguration] Package check flag reset."
+          );
           if (
             vscode.window.activeTextEditor &&
             vscode.window.activeTextEditor.document.languageId === "python"
@@ -730,17 +834,19 @@ export function activate(context: vscode.ExtensionContext) {
   } catch (e: any) {
     // activate 함수 자체 오류 처리
     console.error("Error during extension activation:", e);
-    // Output 채널이 생성되기 전일 수 있으므로 console.error만 사용
     vscode.window.showErrorMessage(
       `FindRuntimeErr failed to activate: ${e.message}`
     );
+    // Output 채널이 생성되지 않았을 수 있으므로 console.error만 사용
   }
 } // activate 함수 끝
 
 export function deactivate() {
   try {
-    // deactivate 내부 try...catch
-    outputChannel.dispose();
+    if (outputChannel) {
+      // outputChannel이 생성되었는지 확인
+      outputChannel.dispose();
+    }
     console.log("FindRuntimeErr extension deactivated.");
   } catch (e: any) {
     console.error("Error during extension deactivation:", e);
