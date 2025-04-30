@@ -71,6 +71,7 @@ function activate(context) {
         // --- getSelectedPythonPath 함수 ---
         async function getSelectedPythonPath(resource) {
             const config = getConfiguration(); // 최신 설정 읽기
+      
             try {
                 outputChannel.appendLine("[getSelectedPythonPath] Determining Python executable path...");
                 // 1. 사용자 설정 확인
