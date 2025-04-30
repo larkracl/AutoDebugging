@@ -1,63 +1,58 @@
 # main.py
 import sys
 import json
-import subprocess
+import os
+import traceback # traceback 추가
+
+# 현재 스크립트 디렉토리를 sys.path에 추가
+script_dir = os.path.dirname(os.path.abspath(__file__))
+if script_dir not in sys.path:
+    sys.path.insert(0, script_dir)
+
+# core 모듈 import 시도 및 오류 처리
+try:
+    from core import analyze_code
+except ImportError as e:
+    error_output = {"errors": [{"message": f"ImportError: {e}. Check sys.path and module locations.", "line": 1, "column": 1, "errorType": "ImportError"}], "call_graph": None}
+    print(json.dumps(error_output))
+    print(f"FATAL: ImportError in main.py: {e}", file=sys.stderr)
+    traceback.print_exc(file=sys.stderr)
+    sys.exit(1)
+except Exception as e: # 다른 종류의 import 에러
+    error_output = {"errors": [{"message": f"Unexpected Import Error: {e}.", "line": 1, "column": 1, "errorType": "ImportError"}], "call_graph": None}
+    print(json.dumps(error_output))
+    print(f"FATAL: Unexpected Import Error in main.py: {e}", file=sys.stderr)
+    traceback.print_exc(file=sys.stderr)
+    sys.exit(1)
 
 def main():
-    code = sys.stdin.read()
-    mode = sys.argv[1] if len(sys.argv) > 1 else 'realtime'  # 기본값: realtime
-
-    if mode == 'static':
-        script_path = 'static_analyze.py'
-    elif mode == 'dynamic':
-        script_path = 'dynamic_analyze.py'  # 아직 미구현
-    elif mode == 'realtime':
-        script_path = 'RT_analyze.py'
-    else:
-        print(json.dumps([{
-            "message": f"Invalid mode: {mode}",
-            "line": 1,
-            "column": 1,
-            "errorType": "InvalidModeError",
-        }]))
-        return
-
+    # main 함수 전체를 try...except로 감싸서 모든 예외 로깅
     try:
-        # subprocess.run을 사용하여 Python 스크립트 실행
-        result = subprocess.run(
-            ['python3', script_path],  # Python 인터프리터와 스크립트 경로
-            input=code,  # 표준 입력으로 코드 전달
-            capture_output=True,  # 표준 출력/에러 캡처
-            text=True,  # 텍스트 모드
-            check=True,  # 오류 발생 시 예외 발생
-            timeout=10 # 타임아웃 설정 (10초)
-        )
-        print(result.stdout)  # 분석 결과 (JSON) 출력
+        code = sys.stdin.read()
+        mode = sys.argv[1] if len(sys.argv) > 1 else 'realtime'
 
-    except subprocess.CalledProcessError as e:
-        # 하위 프로세스(analyze.py) 실행 중 오류 발생 시
-        print(json.dumps([{
-            "message": f"Error in analysis script ({script_path}): {e}",
-            "line": 1,
-            "column": 1,
-            "errorType": "AnalysisScriptError",
-            "stdout": e.stdout,  # analyze.py의 표준 출력 (있는 경우)
-            "stderr": e.stderr   # analyze.py의 표준 에러 (있는 경우)
-        }]))
-    except subprocess.TimeoutExpired:
-        print(json.dumps([{
-            "message": f"Analysis script ({script_path}) timed out.",
-            "line": 1,
-            "column": 1,
-            "errorType": "AnalysisTimeoutError",
-        }]))
-    except Exception as e: #기타 예외
-        print(json.dumps([{
-            "message": f"Unexpected error in main.py: {e}",
-            "line": 1,
-            "column": 1,
-            "errorType": "UnexpectedError",
-        }]))
+        # 동적 분석은 별도 처리
+        if mode == 'dynamic':
+            # TODO: dynamic_analyze.py 실행 또는 관련 로직 호출
+            print(json.dumps({"errors": [{"message": "Dynamic analysis not implemented", "line": 1, "column": 1, "errorType": "NotImplementedError"}], "call_graph": None}))
+            return
+
+        # core.py의 analyze_code 직접 호출
+        try:
+            analysis_result = analyze_code(code, mode=mode)
+        except Exception as e:
+            print(f"Critical error during analyze_code call: {e}", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
+            analysis_result = {"errors": [{"message": f"Critical error during analysis: {e}", "line": 1, "column": 1, "errorType": "CoreAnalysisError"}], "call_graph": None}
+
+        # 결과 출력
+        print(json.dumps(analysis_result))
+
+    except Exception as e:
+        print(f"FATAL error in main function: {e}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
+        print(json.dumps({"errors": [{"message": f"Fatal error in main: {e}", "line": 1, "column": 1, "errorType": "FatalMainError"}], "call_graph": None}))
+        sys.exit(1)
 
 if __name__ == '__main__':
     main()

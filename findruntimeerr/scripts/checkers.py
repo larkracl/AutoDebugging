@@ -1,205 +1,228 @@
 # checkers.py
 import astroid
-from typing import List, Dict, Any, Set
-from utils import get_type, is_compatible
+import os
+import sys
+from typing import List, Dict, Any, Set, Union
+from utils import get_type, is_compatible # utils.py의 함수 사용
+
+class BaseChecker:
+    """모든 체커의 베이스 클래스."""
+    MSG_ID = 'BaseError'
+    node_types = () # 검사할 노드 타입 지정 (튜플)
+
+    def __init__(self, linter):
+        self.linter = linter # Linter 인스턴스 저장
+
+    def add_message(self, node: astroid.NodeNG, message: str):
+        """Linter에 오류 메시지를 추가합니다 (중복 방지 포함)."""
+        line = getattr(node, 'fromlineno', 1) or getattr(node, 'lineno', 1) or 1
+        col = getattr(node, 'col_offset', 0) or 0
+        to_line = getattr(node, 'tolineno', line) or line
+        end_col = getattr(node, 'end_col_offset', col + 1) or (col + 1)
+        line = max(1, line); col = max(0, col)
+        to_line = max(1, to_line); end_col = max(0, end_col)
+        error_key = (self.MSG_ID, line, col, to_line, end_col)
+
+        if not any(err.get('_key') == error_key for err in self.linter.errors):
+            error_info = {
+                'message': message, 'line': line, 'column': col,
+                'to_line': to_line, 'end_column': end_col, # 끝 위치 정보 포함
+                'errorType': self.MSG_ID, '_key': error_key
+            }
+            self.linter.errors.append(error_info)
+
+    # 특정 노드 타입 방문 시 호출될 메서드 (Linter가 호출)
+    def check(self, node: astroid.NodeNG):
+         """각 서브클래스에서 이 메서드를 구현하여 검사를 수행합니다."""
+         raise NotImplementedError
 
 
-def check_zero_division_error(node: astroid.BinOp, errors: list):
-    """ZeroDivisionError를 검사합니다."""
-    print(f"check_zero_division_error called with node: {node!r}")  # 디버깅 출력
-    if isinstance(node.op, astroid.Div):
-        try:
-            right_value = node.right.infer()
-            print(f"  Right operand inferred values: {list(right_value)}")  # 디버깅 출력
-            if any(isinstance(val, astroid.Const) and val.value == 0 for val in right_value):
-                errors.append({
-                    'message': 'Potential ZeroDivisionError: Division by zero',
-                    'line': node.lineno,
-                    'column': node.col_offset,
-                    'errorType': 'ZeroDivisionError'
-                })
-        except astroid.InferenceError:
-            print("  InferenceError in check_zero_division_error")  # 디버깅 출력
-            pass
+# --- 실시간 분석용 체커 ---
 
-def check_name_errors(node: astroid.NodeNG, defined_vars: Set[str], errors: list):
-    """정의되지 않은 변수 사용(NameError)을 검사합니다."""
-    print(f"check_name_errors called with node: {node!r}, defined_vars: {defined_vars}")  # 디버깅 출력
-    if isinstance(node, astroid.Name) and isinstance(node.ctx, astroid.Load):
-        if node.name not in defined_vars:
-            try:
-                print(f"  Looking up name: {node.name}")  # 디버깅 출력
-                node.lookup(node.name)
-                print(f"  Name lookup successful: {node.name}")  # 디버깅 출력
-            except astroid.NotFoundError:
-                print(f"  NameError detected: {node.name}")  # 디버깅 출력
-                errors.append({
-                    'message': f"Potential NameError: Name '{node.name}' is not defined in this scope",
-                    'line': node.lineno,
-                    'column': node.col_offset,
-                    'errorType': 'NameError'
-                })
+class RTNameErrorChecker(BaseChecker):
+    MSG_ID = 'NameErrorRT'
+    node_types = (astroid.Name,)
 
-def check_type_error(node: astroid.BinOp, errors: list):
-    """TypeError를 검사합니다."""
-    print(f"check_type_error called with node: {node!r}")  # 디버깅 출력
-    try:
-        left_type = get_type(node.left)
-        right_type = get_type(node.right)
-        print(f"  Left type: {left_type}, Right type: {right_type}")  # 디버깅 출력
+    def check(self, node: astroid.Name):
+        if hasattr(node, 'ctx') and isinstance(node.ctx, astroid.Load):
+            defined_vars = self.linter.get_current_scope_variables()
+            if node.name not in defined_vars and node.name not in __builtins__: # type: ignore
+                self.add_message(node, f"Potential NameError: Name '{node.name}' might not be defined")
 
-        if left_type and right_type and not is_compatible(left_type, right_type, node.op):
-            errors.append({
-                "message": f"Potential TypeError: Incompatible types for {node.op} operation: {left_type} and {right_type}",
-                "line": node.lineno,
-                "column": node.col_offset,
-                "errorType": "TypeError",
-            })
-    except astroid.InferenceError:
-        print("  InferenceError in check_type_error")  # 디버깅 출력
-        pass
 
-def check_attribute_error(node: astroid.Attribute, errors: list):
-    """AttributeError를 검사합니다."""
-    print(f"check_attribute_error called with node: {node!r}")  # 디버깅 출력
-    try:
-        for inferred in node.value.infer():
-            print(f"  Inferred value: {inferred!r}")  # 디버깅 출력
-            if inferred is astroid.Uninferable:
-                continue
-            if isinstance(inferred, astroid.Instance):
+class RTZeroDivisionChecker(BaseChecker):
+    MSG_ID = 'ZeroDivisionErrorRT'
+    node_types = (astroid.BinOp,)
+
+    def check(self, node: astroid.BinOp):
+        if node.op == '/' and isinstance(node.right, astroid.Const) and node.right.value == 0:
+            self.add_message(node.right, 'Potential ZeroDivisionError: Division by zero') # node.right에 오류 표시
+
+
+# --- 상세 분석용 체커 ---
+
+class StaticNameErrorChecker(BaseChecker):
+    MSG_ID = 'NameErrorStatic'
+    node_types = (astroid.Name,)
+
+    def check(self, node: astroid.Name):
+        if hasattr(node, 'ctx') and isinstance(node.ctx, astroid.Load) and node.name not in __builtins__: # type: ignore
+            defined_vars = self.linter.get_current_scope_variables()
+            if node.name not in defined_vars:
                 try:
-                    inferred.getattr(node.attrname)
+                    node.lookup(node.name)
                 except astroid.NotFoundError:
-                    errors.append({
-                        "message": f"Potential AttributeError: '{inferred.name}' object has no attribute '{node.attrname}'",
-                        "line": node.lineno,
-                        "column": node.col_offset,
-                        "errorType": "AttributeError",
-                    })
-            elif isinstance(inferred, astroid.Const) and inferred.value is None:
-                errors.append({
-                    "message": f"Potential AttributeError: 'NoneType' object has no attribute '{node.attrname}'",
-                    "line": node.lineno,
-                    "column": node.col_offset,
-                    "errorType": "AttributeError",
-                })
-            # 추가: 모듈에 대한 속성 접근 처리
-            elif isinstance(inferred, astroid.Module):
-                 try:
-                    inferred.getattr(node.attrname) # 모듈에서 속성 가져오기
-                 except astroid.NotFoundError:
-                    errors.append({
-                        "message": f"Potential AttributeError: Module '{inferred.name}' has no attribute '{node.attrname}'",
-                        "line": node.lineno,
-                        "column": node.col_offset,
-                        "errorType": "AttributeError",
-                    })
-    except astroid.InferenceError:
-        print("  InferenceError in check_attribute_error")  # 디버깅 출력
-        pass
+                    self.add_message(node, f"Potential NameError: Name '{node.name}' is not defined in this scope")
+                except Exception as e:
+                    print(f"Error during name lookup for '{node.name}': {e}", file=sys.stderr)
 
-def check_index_error(node: astroid.Subscript, errors: list):
-    """IndexError를 검사합니다."""
-    print(f"check_index_error called with node: {node!r}")  # 디버깅 출력
-    try:
-        for value_inferred in node.value.infer():
-            print(f"  Inferred value: {value_inferred!r}")  # 디버깅 출력
-            if value_inferred is astroid.Uninferable:
-                continue
 
-            if isinstance(value_inferred, (astroid.List, astroid.Tuple, astroid.Const)):
-                if isinstance(node.slice, astroid.Const) and isinstance(node.slice.value, int):
-                    index = node.slice.value
-                    try: #길이 추론 시도
-                      length = len(value_inferred.elts) #List, Tuple
-                    except AttributeError:
-                      length = len(value_inferred.value) # Const, str
-                    if index < -length or index >= length:
-                        errors.append({
-                            "message": f"Potential IndexError: Index {index} out of range for sequence of length {length}",
-                            "line": node.lineno,
-                            "column": node.col_offset,
-                            "errorType": "IndexError",
-                        })
+class StaticTypeErrorChecker(BaseChecker):
+    MSG_ID = 'TypeErrorStatic'
+    node_types = (astroid.BinOp, astroid.Call) # Call 노드도 검사 가능
 
-                # 변수 인덱스 (간단한 처리)
-                elif isinstance(node.slice, astroid.Name):
-                     errors.append({
-                        "message": f"Potential IndexError: Index might be out of range (variable index).",
-                        "line": node.lineno,
-                        "column": node.col_offset,
-                        "errorType": "IndexError",
-                    })
-    except astroid.InferenceError:
-        print("  InferenceError in check_index_error")  # 디버깅 출력
-        pass
+    def check(self, node: Union[astroid.BinOp, astroid.Call]):
+        if isinstance(node, astroid.BinOp):
+            try:
+                left_type = get_type(node.left)
+                right_type = get_type(node.right)
+                if left_type and right_type and not is_compatible(left_type, right_type, node.op):
+                    self.add_message(node, f"Potential TypeError: Incompatible types for '{node.op}' operation: {left_type} and {right_type}")
+            except astroid.InferenceError: pass
+        # elif isinstance(node, astroid.Call): # 함수 호출 타입 검사 (추가 가능)
+        #     # 예: func(arg) 호출 시 func의 파라미터 타입과 arg의 타입 비교
+        #     pass
 
-def check_key_error(node: astroid.Subscript, errors: list):
-    """KeyError를 검사합니다."""
-    print(f"check_key_error called with node: {node!r}")  # 디버깅 출력
-    try:
-        for value_inferred in node.value.infer():
-            print(f"  Inferred value: {value_inferred!r}")  # 디버깅 출력
-            if value_inferred is astroid.Uninferable:
-                continue
 
-            if isinstance(value_inferred, astroid.Dict):
-                if isinstance(node.slice, astroid.Const):
-                    key = node.slice.value
-                    dict_keys = [k.value for k in value_inferred.keys if isinstance(k, astroid.Const)]
-                    if key not in dict_keys:
-                        errors.append({
-                            "message": f"Potential KeyError: Key '{key}' not found in dictionary",
-                            "line": node.lineno,
-                            "column": node.col_offset,
-                            "errorType": "KeyError",
-                        })
-    except astroid.InferenceError:
-        print("  InferenceError in check_key_error")  # 디버깅 출력
-        pass
+class StaticAttributeErrorChecker(BaseChecker):
+    MSG_ID = 'AttributeErrorStatic'
+    node_types = (astroid.Attribute,)
 
-def check_infinite_loop(node: astroid.While, errors: list):
-    """잠재적 무한 루프(while True:)를 검사합니다."""
-    print(f"check_infinite_loop called with node: {node!r}")  # 디버깅 출력
-    if isinstance(node.test, astroid.Const) and node.test.value is True:
-        if not any(isinstance(child, astroid.Break) for child in node.body):
-            errors.append({
-                'message': 'Potential infinite loop: while True without break',
-                'line': node.lineno,
-                'column': node.col_offset,
-                'errorType': 'InfiniteLoop'
-            })
+    def check(self, node: astroid.Attribute):
+         try:
+             value_inferred_list = list(node.value.infer())
+             if not value_inferred_list: return
+             has_attribute = False; possible_types = []; found_none_error = False
 
-def check_recursion_error(func_node: astroid.FunctionDef, errors: list):
-    """재귀 호출(RecursionError)을 검사합니다."""
-    print(f"check_recursion_error called with node: {func_node!r}")  # 디버깅 출력
-    for node in func_node.body:
-        if isinstance(node, astroid.Call):
-            if (
-                isinstance(node.func, astroid.Name)
-                and node.func.name == func_node.name
-            ):
-                errors.append({
-                    'message': 'Potential RecursionError: Recursive function call',
-                    'line': node.lineno,
-                    'column': node.col_offset,
-                    'errorType': 'RecursionError'
-                })
-        # 만약 내부에 또다른 함수 정의가 있다면, 재귀적으로 검사.
-        if isinstance(node, astroid.FunctionDef):
-            check_recursion_error(node, errors)
+             for inferred in value_inferred_list:
+                 if inferred is astroid.Uninferable: possible_types.append("Uninferable"); continue
+                 current_type_name = getattr(inferred, 'name', type(inferred).__name__)
+                 if current_type_name == 'NoneType' and any(err['line']==node.lineno and err['column']==node.col_offset and err['errorType']==self.MSG_ID for err in self.linter.errors): continue
+                 possible_types.append(current_type_name)
 
-def check_file_not_found_error(node: astroid.Call, errors: list):
-    """파일이 존재하지 않는 경우(FileNotFoundError)를 검사합니다."""
-    print(f"check_file_not_found_error called with node: {node!r}")  # 디버깅 출력
-    # open() 함수 호출이고, 첫 번째 인자가 문자열 상수인 경우
-    if node.args and isinstance(node.args[0], astroid.Const):
-        file_path = node.args[0].value
-        if isinstance(file_path, str) and not os.path.exists(file_path):
-            errors.append({
-                "message": f"Potential FileNotFoundError: File '{file_path}' does not exist",
-                "line": node.lineno,
-                "column": node.col_offset,
-                "errorType": "FileNotFoundError",
-            })
+                 if isinstance(inferred, astroid.Instance):
+                     try: inferred.getattr(node.attrname); has_attribute = True; break
+                     except astroid.NotFoundError: pass
+                 elif isinstance(inferred, astroid.Const) and inferred.value is None:
+                     if not any(err['line']==node.lineno and err['column']==node.col_offset and err['errorType']==self.MSG_ID for err in self.linter.errors):
+                          self.add_message(node, f"Potential AttributeError: 'NoneType' object has no attribute '{node.attrname}'")
+                     found_none_error = True
+                 elif isinstance(inferred, astroid.Module):
+                      try: inferred.getattr(node.attrname); has_attribute = True; break
+                      except astroid.NotFoundError: pass
+                 elif hasattr(inferred, node.attrname): has_attribute = True; break
+
+             if not has_attribute and not found_none_error:
+                 if not any(err['line']==node.lineno and err['column']==node.col_offset and err['errorType']==self.MSG_ID for err in self.linter.errors):
+                      types_str = ", ".join(sorted(list(set(possible_types) - {"Uninferable"})))
+                      if types_str:
+                           self.add_message(node, f"Potential AttributeError: Object(s) of type '{types_str}' may not have attribute '{node.attrname}'")
+         except astroid.InferenceError: pass
+
+
+class StaticIndexErrorChecker(BaseChecker):
+    MSG_ID = 'IndexErrorStatic'
+    node_types = (astroid.Subscript,)
+
+    def check(self, node: astroid.Subscript):
+        try:
+            slice_inferred = list(node.slice.infer()); index_value = None
+            if not slice_inferred or slice_inferred[0] is astroid.Uninferable:
+                if isinstance(node.slice, astroid.Name): pass # 변수 인덱스 경고 제거
+                return
+            elif isinstance(slice_inferred[0], astroid.Const) and isinstance(slice_inferred[0].value, int): index_value = slice_inferred[0].value
+            else: return
+            if index_value is None: return
+
+            for value_inferred in node.value.infer():
+                if value_inferred is astroid.Uninferable: continue
+                length = None
+                if isinstance(value_inferred, (astroid.List, astroid.Tuple)): length = len(value_inferred.elts)
+                elif isinstance(value_inferred, astroid.Const) and isinstance(value_inferred.value, str): length = len(value_inferred.value)
+                if length is not None and (index_value < -length or index_value >= length):
+                    self.add_message(node.slice, f"Potential IndexError: Index {index_value} out of range for sequence of length {length}"); return # node.slice에 오류 표시
+        except astroid.InferenceError: pass
+
+
+class StaticKeyErrorChecker(BaseChecker):
+    MSG_ID = 'KeyErrorStatic'
+    node_types = (astroid.Subscript,)
+
+    def check(self, node: astroid.Subscript):
+        try:
+            slice_inferred = list(node.slice.infer()); key_value = None
+            if not slice_inferred or slice_inferred[0] is astroid.Uninferable: return
+            elif isinstance(slice_inferred[0], astroid.Const): key_value = slice_inferred[0].value
+            else: return
+
+            for value_inferred in node.value.infer():
+                if value_inferred is astroid.Uninferable: continue
+                if isinstance(value_inferred, astroid.Dict):
+                    dict_keys = set()
+                    can_check_keys = True
+                    for k_node, _ in value_inferred.items:
+                         if isinstance(k_node, astroid.Const): dict_keys.add(k_node.value)
+                         else: can_check_keys = False; break
+                    if can_check_keys and key_value not in dict_keys:
+                        self.add_message(node.slice, f"Potential KeyError: Key {repr(key_value)} may not be found in dictionary"); return # node.slice에 오류 표시
+        except astroid.InferenceError: pass
+
+
+class StaticInfiniteLoopChecker(BaseChecker):
+    MSG_ID = 'InfiniteLoopStatic'
+    node_types = (astroid.While,)
+
+    def check(self, node: astroid.While):
+        if isinstance(node.test, astroid.Const) and node.test.value is True:
+            has_break = any(isinstance(sub_node, astroid.Break) for sub_node in node.walk())
+            if not has_break: self.add_message(node.test, 'Potential infinite loop: `while True` without a reachable `break` statement') # node.test에 오류 표시
+
+class StaticRecursionChecker(BaseChecker):
+    MSG_ID = 'RecursionErrorStatic'
+    # 이 체커는 Linter의 analyze 메소드에서 함수 단위로 호출
+    def check_function_recursion(self, func_node: astroid.FunctionDef):
+         for node in func_node.walk():
+             if isinstance(node, astroid.Call):
+                 if isinstance(node.func, astroid.Name) and node.func.name == func_node.name:
+                     self.add_message(node.func, f"Potential RecursionError: Recursive call to function '{func_node.name}'") # node.func에 오류 표시
+
+
+class StaticFileNotFoundChecker(BaseChecker):
+     MSG_ID = 'FileNotFoundErrorStatic'
+     node_types = (astroid.Call,)
+
+     def check(self, node: astroid.Call):
+          if isinstance(node.func, astroid.Name) and node.func.name == 'open':
+              if node.args and isinstance(node.args[0], astroid.Const):
+                  file_path_value = node.args[0].value
+                  if isinstance(file_path_value, str) and not os.path.exists(file_path_value):
+                      self.add_message(node.args[0], f"Potential FileNotFoundError: File '{file_path_value}' might not exist") # node.args[0]에 오류 표시
+
+
+# 체커 클래스 목록
+RT_CHECKERS_CLASSES = [
+    RTNameErrorChecker,
+    RTZeroDivisionChecker,
+]
+
+STATIC_CHECKERS_CLASSES = [
+    StaticNameErrorChecker,
+    RTZeroDivisionChecker, # 재사용
+    StaticTypeErrorChecker,
+    StaticAttributeErrorChecker,
+    StaticIndexErrorChecker,
+    StaticKeyErrorChecker,
+    StaticInfiniteLoopChecker,
+    StaticRecursionChecker, # Linter에서 별도 호출
+    StaticFileNotFoundChecker,
+]
