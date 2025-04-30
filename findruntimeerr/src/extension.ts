@@ -18,8 +18,8 @@ interface ErrorInfo {
   message: string;
   line: number;
   column: number;
-  to_line?: number; // 끝 라인 추가 (checkers.py에서 설정)
-  end_column?: number; // 끝 컬럼 추가 (checkers.py에서 설정)
+  to_line?: number;
+  end_column?: number;
   errorType: string;
 }
 interface CallGraphData {
@@ -295,54 +295,48 @@ export function activate(context: vscode.ExtensionContext) {
       return new Promise((resolve) => {
         try {
           let proceedAnalysis = true;
-          // 패키지 확인 (첫 실행 또는 설정 변경 시 확인하도록 checkedPackages 플래그 사용)
-          if (!checkedPackages) {
-            const requiredPackages = ["astroid", "networkx"];
-            const checkResult = checkPythonPackages(
-              pythonExecutable,
-              requiredPackages
-            );
-            if (checkResult.error) {
-              resolve({
-                errors: [
-                  {
-                    message: checkResult.error,
-                    line: 1,
-                    column: 0,
-                    errorType: "PythonPathError",
-                  },
-                ],
-                call_graph: null,
-              });
-              return;
-            }
-            if (checkResult.missing.length > 0) {
-              const missing = checkResult.missing.join(", ");
-              const message = `FindRuntimeErr requires: ${missing}. Please run 'pip install ${missing}' in your Python environment ('${pythonExecutable}'). Analysis skipped.`;
-              // resolve로 오류 전달
-              resolve({
-                errors: [
-                  {
-                    message: message,
-                    line: 1,
-                    column: 0,
-                    errorType: "MissingDependencyError",
-                  },
-                ],
-                call_graph: null,
-              });
-              proceedAnalysis = false;
-              checkedPackages = true; // 오류 발생해도 다시 체크 안 함
-            }
-            if (proceedAnalysis) {
-              // 오류 없이 확인 완료 시
-              checkedPackages = true;
-            }
+          // 패키지 확인 (매번 실행)
+          const requiredPackages = ["astroid", "networkx"];
+          const checkResult = checkPythonPackages(
+            pythonExecutable,
+            requiredPackages
+          );
+          if (checkResult.error) {
+            resolve({
+              errors: [
+                {
+                  message: checkResult.error,
+                  line: 1,
+                  column: 0,
+                  errorType: "PythonPathError",
+                },
+              ],
+              call_graph: null,
+            });
+            return;
           }
+          if (checkResult.missing.length > 0) {
+            const missing = checkResult.missing.join(", ");
+            const message = `FindRuntimeErr requires: ${missing}. Please run 'pip install ${missing}' in your Python environment ('${pythonExecutable}'). Analysis skipped.`;
+            resolve({
+              errors: [
+                {
+                  message: message,
+                  line: 1,
+                  column: 0,
+                  errorType: "MissingDependencyError",
+                },
+              ],
+              call_graph: null,
+            });
+            proceedAnalysis = false;
+            // checkedPackages = true; // 이 플래그를 다시 사용하려면 activate 스코프 유지 필요
+          }
+          // checkedPackages = true; // 성공 시 다시 체크 안 함
 
           if (!proceedAnalysis) {
             return;
-          } // 패키지 없으면 분석 중단
+          }
 
           const extensionRootPath = context.extensionPath;
           const scriptDir = path.join(extensionRootPath, "scripts");
@@ -520,7 +514,6 @@ export function activate(context: vscode.ExtensionContext) {
         clearPreviousAnalysis(documentUri);
 
         let analysisResult: AnalysisResult | null = null;
-        let analysisError: Error | null = null; // 이제 거의 사용 안 함
 
         if (showProgress) {
           await vscode.window.withProgress(
@@ -565,7 +558,6 @@ export function activate(context: vscode.ExtensionContext) {
                   `[analyzeCode] Analysis processed (${mode}). ${analysisResult.errors.length} potential issues found.`
                 );
               } catch (error: any) {
-                analysisError = error;
                 console.error(
                   "Unexpected error during analysis progress:",
                   error
@@ -601,7 +593,6 @@ export function activate(context: vscode.ExtensionContext) {
             analysisResult = await runAnalysisProcess(code, mode);
             handleAnalysisResult(documentUri, config, analysisResult, mode);
           } catch (error: any) {
-            analysisError = error; // 혹시 모를 reject 대비
             console.error("Real-time analysis failed unexpectedly:", error);
             outputChannel.appendLine(
               `[analyzeCode] Real-time analysis failed unexpectedly: ${error.message}`
@@ -624,9 +615,9 @@ export function activate(context: vscode.ExtensionContext) {
             );
           }
         }
-        if (!analysisResult && !analysisError) {
+        if (!analysisResult) {
           outputChannel.appendLine(
-            `[analyzeCode] Analysis finished with no result and no error (${mode}).`
+            `[analyzeCode] Analysis finished with null result (${mode}).`
           );
           clearPreviousAnalysis(documentUri);
         }
@@ -638,7 +629,7 @@ export function activate(context: vscode.ExtensionContext) {
       }
     }
 
-    // --- 결과 처리 및 표시 함수 ---
+    // --- 결과 처리 및 표시 함수 (handleAnalysisResult) ---
     function handleAnalysisResult(
       documentUri: vscode.Uri,
       config: ExtensionConfig,
@@ -646,12 +637,29 @@ export function activate(context: vscode.ExtensionContext) {
       mode: string
     ) {
       try {
-        // result.errors는 runAnalysisProcess에서 배열로 보장됨
+        // result.errors가 배열인지 다시 한번 확인 (매우 중요)
+        if (!(result && Array.isArray(result.errors))) {
+          const errorMsg = `Invalid 'errors' format received: ${JSON.stringify(
+            result
+          )}`;
+          outputChannel.appendLine(`[handleResult] ${errorMsg}`);
+          // Problems 패널에 내부 오류 표시
+          displayDiagnostics(documentUri, config, [
+            {
+              message: errorMsg,
+              line: 1,
+              column: 0,
+              errorType: "InvalidResultFormatError",
+            },
+          ]);
+          return; // 더 이상 진행하지 않음
+        }
+
         const errors: ErrorInfo[] = result.errors;
         outputChannel.appendLine(
           `[handleResult] Processing ${errors.length} diagnostics/errors.`
         );
-        displayDiagnostics(documentUri, config, errors); // Problems 패널 업데이트
+        displayDiagnostics(documentUri, config, errors); // 진단 정보 표시
 
         const callGraphData = result.call_graph;
         const hasScriptError = errors.some((e) =>
@@ -671,6 +679,7 @@ export function activate(context: vscode.ExtensionContext) {
             "ProcessExecutionError",
             "PythonPathError",
             "HandleResultError",
+            "InvalidResultFormatError",
           ].includes(e.errorType)
         );
 
@@ -679,27 +688,42 @@ export function activate(context: vscode.ExtensionContext) {
           outputChannel.appendLine(JSON.stringify(callGraphData, null, 2)); // Output 채널에 JSON 출력
           console.log("Call Graph Data:", callGraphData); // 디버그 콘솔에도 출력
         }
-      } catch (e: any) {
-        console.error("Error handling analysis result:", e);
+      } catch (error: any) {
+        console.error("Error handling analysis result:", error);
         outputChannel.appendLine(
-          `ERROR handling analysis result: ${e.message}\n${e.stack}`
+          `ERROR handling analysis result: ${error.message}\n${error.stack}`
         );
         const diagnostic = new vscode.Diagnostic(
           new vscode.Range(0, 0, 0, 0),
-          `Internal Error handling results: ${e.message}`,
+          `Internal Error handling results: ${error.message}`,
           vscode.DiagnosticSeverity.Error
         );
         diagnostic.source = "FindRuntimeErr";
         diagnosticCollection.set(documentUri, [diagnostic]);
       }
     }
+
+    // --- 진단 정보 표시 함수 (displayDiagnostics) ---
     function displayDiagnostics(
       documentUri: vscode.Uri,
       config: ExtensionConfig,
       errors: ErrorInfo[]
     ) {
       if (!Array.isArray(errors)) {
-        /* ... 이전 배열 확인 로직 ... */ return;
+        outputChannel.appendLine(
+          `[displayDiagnostics] CRITICAL ERROR: Invalid errors object received (not an array): ${JSON.stringify(
+            errors
+          )}`
+        );
+        diagnosticCollection.set(documentUri, []);
+        const editor = vscode.window.activeTextEditor;
+        if (
+          editor &&
+          editor.document.uri.toString() === documentUri.toString()
+        ) {
+          editor.setDecorations(errorDecorationType, []);
+        }
+        return;
       }
       try {
         outputChannel.appendLine(
@@ -735,7 +759,8 @@ export function activate(context: vscode.ExtensionContext) {
               "ProcessExecutionError",
               "PythonPathError",
               "HandleResultError",
-            ].includes(error.errorType);
+              "InvalidResultFormatError",
+            ].includes(error.errorType); // 내부 오류 타입 추가
             const severity = isInternalError
               ? vscode.DiagnosticSeverity.Error
               : config.severityLevel;
@@ -752,7 +777,7 @@ export function activate(context: vscode.ExtensionContext) {
 
             const line = Math.max(0, error.line - 1);
             const column = Math.max(0, error.column);
-            // 끝 위치 정보 사용
+            // 끝 위치 정보 사용 (없으면 기본값)
             const toLine = Math.max(line, (error.to_line ?? error.line) - 1);
             const endColumn = Math.max(
               column + 1,
@@ -779,11 +804,11 @@ export function activate(context: vscode.ExtensionContext) {
               (finalSeverity === vscode.DiagnosticSeverity.Error ||
                 finalSeverity === vscode.DiagnosticSeverity.Warning)
             ) {
-              decorationRanges.push(range); // Error/Warning 범위만 밑줄
+              decorationRanges.push(range);
             }
           } catch (e: any) {
             outputChannel.appendLine(
-              `[displayDiagnostics] Error processing individual error: ${e.message}`
+              `[displayDiagnostics] Error processing individual error object: ${e.message}\n${e.stack}`
             );
           }
         });
@@ -807,6 +832,7 @@ export function activate(context: vscode.ExtensionContext) {
         );
       }
     }
+    // --- 이전 분석 결과 지우는 함수 ---
     function clearPreviousAnalysis(documentUri: vscode.Uri) {
       try {
         /* ... 이전과 동일 ... */
@@ -833,9 +859,9 @@ export function activate(context: vscode.ExtensionContext) {
               );
               hoverContent.appendMarkdown(
                 `${diagnostic.message.split(" : ")[0].trim()}\n\n`
-              ); // 콜론 앞 부분
-              // 추가 정보 (필요시)
-              // hoverContent.appendMarkdown(`*Hint: ...*`);
+              );
+              // 추가 정보 (예시)
+              // if (diagnostic.code === 'NameError') { hoverContent.appendMarkdown(`*Hint: Check definition.*`); }
               if (
                 diagnostic.source === "FindRuntimeErr" &&
                 diagnostic.message.startsWith("FindRuntimeErr Internal Error:")
@@ -920,7 +946,6 @@ export function activate(context: vscode.ExtensionContext) {
   } catch (e: any) {
     // activate 함수 자체 오류 처리
     console.error("Error during extension activation:", e);
-    // activate 실패 시 outputChannel이 없을 수 있으므로 console.error만 사용
     vscode.window.showErrorMessage(
       `FindRuntimeErr failed to activate: ${e.message}`
     );

@@ -1,4 +1,4 @@
-def python_test_code():
+def python_test_code()
     y = 10
     x = y + 1
     print(x) # 함수 실행 시 11 출력
