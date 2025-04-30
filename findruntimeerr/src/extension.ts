@@ -484,6 +484,52 @@ export function activate(context: vscode.ExtensionContext) {
       });
     }
 
+    function runDynamicAnalysisProcess(code: string): Promise<AnalysisResult> {
+      return new Promise((resolve, reject) => {
+        const pythonExecutable = path.join(
+          context.extensionPath,
+          "venv",
+          "bin",
+          "python"
+        );
+        const scriptPath = path.join(context.extensionPath, "scripts", "dynamic_analyze.py");
+        outputChannel.appendLine(`[runDynamicAnalysis] Spawning: ${pythonExecutable} ${scriptPath}`);
+        const pythonProcess = spawn(pythonExecutable, [scriptPath]);
+  
+        let stdoutData = "";
+        let stderrData = "";
+  
+        pythonProcess.stdin.write(code);
+        pythonProcess.stdin.end();
+  
+        pythonProcess.stdout.on("data", (data) => {
+          stdoutData += data;
+        });
+        pythonProcess.stderr.on("data", (data) => {
+          stderrData += data;
+          outputChannel.appendLine(`[Dynamic Py Stderr] ${data}`);
+        });
+  
+        pythonProcess.on("close", (closeCode) => {
+          outputChannel.appendLine(`[runDynamicAnalysis] Python process exited with code: ${closeCode}`);
+          if (closeCode !== 0) {
+            reject(new Error(`Dynamic analysis failed. Stderr: ${stderrData.trim()}`));
+            return;
+          }
+          try {
+            const result: AnalysisResult = JSON.parse(stdoutData);
+            resolve(result);
+          } catch (error: any) {
+            reject(new Error(`Error parsing dynamic analysis result: ${error.message}`));
+          }
+        });
+  
+        pythonProcess.on("error", (err) => {
+          reject(new Error(`Failed to start dynamic analysis: ${err.message}`));
+        });
+      });
+    }
+
     // --- 분석 로직 (analyzeCode) ---
     async function analyzeCode(
       code: string,
@@ -923,14 +969,32 @@ export function activate(context: vscode.ExtensionContext) {
       vscode.commands.registerCommand(
         "findRuntimeErr.runDynamicAnalysis",
         () => {
-          try {
-            /* ... */
-          } catch (e: any) {
-            /* ... */
-          }
-        }
-      )
-    );
+const editor = vscode.window.activeTextEditor;
+      if (editor && editor.document.languageId === "python") {
+        outputChannel.appendLine("[Command] findRuntimeErr.runDynamicAnalysis executed.");
+        const config = getConfiguration();
+        clearPreviousAnalysis(editor.document.uri);
+
+        runDynamicAnalysisProcess(editor.document.getText())
+          .then((result) => {
+            handleAnalysisResult(editor.document.uri, config, result, "dynamic");
+            vscode.window.showInformationMessage(
+              `FindRuntimeErr: Dynamic analysis completed. ${result.errors.length} error(s) found.`
+            );
+          })
+          .catch((error) => {
+            outputChannel.appendLine(`[Command Error] Dynamic analysis failed: ${error.message}`);
+            vscode.window.showErrorMessage(
+              `FindRuntimeErr: Dynamic analysis failed. ${error.message}`
+            );
+          });
+      } else {
+        vscode.window.showWarningMessage(
+          "FindRuntimeErr: Please open a Python file to run dynamic analysis."
+        );
+      }
+    })
+  );
 
     // --- 초기 실행 ---
     if (

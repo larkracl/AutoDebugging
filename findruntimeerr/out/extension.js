@@ -66,7 +66,6 @@ function activate(context) {
                 };
             }
         }
-        // --- getPythonExecutablePath 함수 ---
         async function getPythonExecutablePath(context, config) {
             try {
                 if (config.pythonPath && fs.existsSync(config.pythonPath)) {
