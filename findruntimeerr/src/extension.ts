@@ -519,48 +519,144 @@ export function activate(context: vscode.ExtensionContext) {
       });
     }
 
-    function runDynamicAnalysisProcess(code: string): Promise<AnalysisResult> {
-      return new Promise((resolve, reject) => {
-        const pythonExecutable = path.join(
-          context.extensionPath,
-          "venv",
-          "bin",
-          "python"
+    async function runDynamicAnalysisProcess(
+      code: string,
+      documentUri?: vscode.Uri
+    ): Promise<AnalysisResult> {
+      let pythonExecutable: string;
+      try {
+        pythonExecutable = await getSelectedPythonPath(documentUri);
+      } catch (e: any) {
+        return {
+          errors: [
+            {
+              message: `Failed to determine Python path: ${e.message}`,
+              line: 1,
+              column: 0,
+              errorType: "PythonPathError",
+            },
+          ],
+          call_graph: null,
+        };
+      }
+      // Check packages
+      const pkgCheck = checkPythonPackages(pythonExecutable, [
+        "astroid",
+        "networkx",
+      ]);
+      if (pkgCheck.error) {
+        return {
+          errors: [
+            {
+              message: pkgCheck.error,
+              line: 1,
+              column: 0,
+              errorType: "MissingDependencyError",
+            },
+          ],
+          call_graph: null,
+        };
+      }
+      if (pkgCheck.missing.length > 0) {
+        return {
+          errors: [
+            {
+              message: `Missing packages: ${pkgCheck.missing.join(
+                ", "
+              )}. Please install in ${pythonExecutable}.`,
+              line: 1,
+              column: 0,
+              errorType: "MissingDependencyError",
+            },
+          ],
+          call_graph: null,
+        };
+      }
+
+      const extensionRootPath = context.extensionPath;
+      const scriptDir = path.join(extensionRootPath, "scripts");
+      const scriptPath = path.join(scriptDir, "dynamic_analyze.py");
+      if (!fs.existsSync(scriptPath)) {
+        return {
+          errors: [
+            {
+              message: `dynamic_analyze.py not found at ${scriptPath}`,
+              line: 1,
+              column: 0,
+              errorType: "ScriptNotFoundError",
+            },
+          ],
+          call_graph: null,
+        };
+      }
+
+      return new Promise((resolve) => {
+        const spawnOpts: SpawnOptionsWithoutStdio = { cwd: scriptDir };
+        outputChannel.appendLine(
+          `[runDynamicAnalysisProcess] Spawning: "${pythonExecutable}" "${scriptPath}"`
         );
-        const scriptPath = path.join(context.extensionPath, "scripts", "dynamic_analyze.py");
-        outputChannel.appendLine(`[runDynamicAnalysis] Spawning: ${pythonExecutable} ${scriptPath}`);
-        const pythonProcess = spawn(pythonExecutable, [scriptPath]);
-  
+        const proc = spawn(pythonExecutable, [scriptPath], spawnOpts);
         let stdoutData = "";
         let stderrData = "";
-  
-        pythonProcess.stdin.write(code);
-        pythonProcess.stdin.end();
-  
-        pythonProcess.stdout.on("data", (data) => {
+        proc.stdin.write(code);
+        proc.stdin.end();
+        proc.stdout.on("data", (data) => {
           stdoutData += data;
         });
-        pythonProcess.stderr.on("data", (data) => {
+        proc.stderr.on("data", (data) => {
           stderrData += data;
-          outputChannel.appendLine(`[Dynamic Py Stderr] ${data}`);
+          outputChannel.appendLine(`[runDynamicAnalysisProcess] STDERR: ${data}`);
         });
-  
-        pythonProcess.on("close", (closeCode) => {
-          outputChannel.appendLine(`[runDynamicAnalysis] Python process exited with code: ${closeCode}`);
-          if (closeCode !== 0) {
-            reject(new Error(`Dynamic analysis failed. Stderr: ${stderrData.trim()}`));
+        proc.on("close", (code) => {
+          outputChannel.appendLine(
+            `[runDynamicAnalysisProcess] Process exited with code ${code}`
+          );
+          outputChannel.appendLine(
+            `[runDynamicAnalysisProcess] RAW STDOUT: ${stdoutData}`
+          );
+          if (code !== 0) {
+            resolve({
+              errors: [
+                {
+                  message: `Dynamic analysis failed (Exit ${code}): ${stderrData.trim()}`,
+                  line: 1,
+                  column: 0,
+                  errorType: "DynamicScriptError",
+                },
+              ],
+              call_graph: null,
+            });
             return;
           }
           try {
             const result: AnalysisResult = JSON.parse(stdoutData);
             resolve(result);
-          } catch (error: any) {
-            reject(new Error(`Error parsing dynamic analysis result: ${error.message}`));
+          } catch (e: any) {
+            resolve({
+              errors: [
+                {
+                  message: `Error parsing dynamic analysis result: ${e.message}`,
+                  line: 1,
+                  column: 0,
+                  errorType: "JSONParseError",
+                },
+              ],
+              call_graph: null,
+            });
           }
         });
-  
-        pythonProcess.on("error", (err) => {
-          reject(new Error(`Failed to start dynamic analysis: ${err.message}`));
+        proc.on("error", (err) => {
+          resolve({
+            errors: [
+              {
+                message: `Failed to start dynamic analysis process: ${err.message}`,
+                line: 1,
+                column: 0,
+                errorType: "SpawnError",
+              },
+            ],
+            call_graph: null,
+          });
         });
       });
     }
@@ -852,7 +948,7 @@ const editor = vscode.window.activeTextEditor;
         const config = getConfiguration();
         clearPreviousAnalysis(editor.document.uri);
 
-        runDynamicAnalysisProcess(editor.document.getText())
+        runDynamicAnalysisProcess(editor.document.getText(), editor.document.uri)
           .then((result) => {
             handleAnalysisResult(editor.document.uri, config, result, "dynamic");
             vscode.window.showInformationMessage(

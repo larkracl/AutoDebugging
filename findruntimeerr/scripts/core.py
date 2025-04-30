@@ -1,8 +1,10 @@
 # core.py
+# core.py
 import astroid
 import sys
 import networkx as nx
 from typing import List, Dict, Any, Set, Tuple, Optional, Union
+import re
 # utils.py 함수 사용 (get_type, is_compatible, collect_defined_variables)
 from utils import collect_defined_variables, get_type, is_compatible
 # checkers 모듈에서 체커 클래스 목록과 BaseChecker import
@@ -43,6 +45,26 @@ class Linter:
 
     def add_message(self, msg_id: str, node: astroid.NodeNG, message: str):
         """체커가 오류 메시지를 추가할 때 사용하는 메서드 (중복 방지 포함)."""
+        # --- SyntaxError 예외 객체 특수 처리 ---
+        if isinstance(node, astroid.AstroidSyntaxError):
+            # Extract line number from error message
+            msg = str(node)
+            match = re.search(r'line (\d+)', msg)
+            line_num = int(match.group(1)) if match else 1
+            col_num = getattr(node, 'col_offset', 0) or 0
+            error_key = (self.MSG_ID if hasattr(self, 'MSG_ID') else msg_id, line_num, col_num, line_num, col_num + 1)
+            if not any(err.get('_key') == error_key for err in self.errors):
+                error_info = {
+                    'message': f"SyntaxError: {msg}",
+                    'line': line_num,
+                    'column': col_num,
+                    'to_line': line_num,
+                    'end_column': col_num + 1,
+                    'errorType': 'SyntaxError',
+                    '_key': error_key
+                }
+                self.errors.append(error_info)
+            return
         try: # 노드 속성 접근 시 오류 방지
             line = getattr(node, 'fromlineno', None) or getattr(node, 'lineno', 1) or 1
             col = getattr(node, 'col_offset', 0) or 0

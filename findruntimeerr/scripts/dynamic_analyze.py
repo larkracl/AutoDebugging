@@ -3,11 +3,34 @@ import json
 import traceback
 import astroid
 import os
-import requests
+import requests  # remove this line
+
+# Google GenAI client for Gemini API
+import base64
+from google import genai
+from google.genai import types
+
+# Load API key from secret.properties if present, else from environment
+script_dir = os.path.dirname(__file__)
+project_root = os.path.abspath(os.path.join(script_dir, os.pardir))
+properties_file = os.path.join(project_root, "secret.properties")
+api_key = None
+if os.path.exists(properties_file):
+    try:
+        with open(properties_file, "r") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    key, sep, val = line.partition("=")
+                    if key.strip() == "GEMINI_API_KEY" and sep == "=":
+                        api_key = val.strip()
+                        break
+    except Exception:
+        pass
+GEMINI_API_KEY = api_key or os.getenv("GEMINI_API_KEY")
 
 # Configuration for Gemini free API
 GEMINI_API_URL = "https://api.gemini.com/v1/generate"
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 def parse_functions(code: str):
     """
@@ -37,30 +60,42 @@ def generate_test_cases(func_name, comment):
     """
     Gemini API를 이용해 함수별 10개의 테스트케이스 생성 요청.
     """
-    if not GEMINI_API_KEY:
-        raise RuntimeError("GEMINI_API_KEY not set in environment")
+    # Use Google GenAI client for Gemini API
+    client = genai.Client(
+        vertexai=True,
+        project="",    # TODO: set your project ID or read from config
+        location="",   # TODO: set your location or read from config
+    )
+    model = "gemini-2.5-flash-preview-04-17"
     prompt = (
         f"Generate exactly 10 test cases for the Python function `{func_name}`.\n"
         f"Description/comment: {comment}\n"
         "Return a JSON array of objects with fields: `input` (list of args) and `expected`."
     )
-    headers = {
-        "Authorization": f"Bearer {GEMINI_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "prompt": prompt,
-        "max_tokens": 512,
-        "n": 1
-    }
-    resp = requests.post(GEMINI_API_URL, headers=headers, json=payload, timeout=10)
-    resp.raise_for_status()
-    body = resp.json()
-    text = body.get("data", [{}])[0].get("generated_text", "")
+    print(f"[Gemini] Prompt for `{func_name}`: {prompt}", file=sys.stderr)
+    contents = [
+        types.Content(
+            role="user",
+            parts=[
+                types.Part.from_text(text=prompt),
+            ],
+        ),
+    ]
+    generate_content_config = types.GenerateContentConfig(
+        response_mime_type="text/plain",
+    )
+    text = ""
+    for chunk in client.models.generate_content_stream(
+        model=model,
+        contents=contents,
+        config=generate_content_config,
+    ):
+        text += chunk.text
+        print(f"[Gemini] Stream chunk for `{func_name}`: {chunk.text}", file=sys.stderr)
     try:
         cases = json.loads(text)
-    except Exception:
-        # 파싱 실패 시 빈 리스트 반환
+    except Exception as e:
+        print(f"[Gemini] Failed to parse JSON for `{func_name}`: {e}", file=sys.stderr)
         cases = []
     return cases
 
