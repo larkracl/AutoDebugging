@@ -2,7 +2,7 @@
 import sys
 import json
 import os
-import traceback # traceback 추가
+import traceback
 
 # 현재 스크립트 디렉토리를 sys.path에 추가
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -11,6 +11,7 @@ if script_dir not in sys.path:
 
 # core 모듈 import 시도 및 오류 처리
 try:
+    # parso 기반으로 수정된 core.py를 import
     from core import analyze_code
 except ImportError as e:
     error_output = {"errors": [{"message": f"ImportError: {e}. Check sys.path and module locations.", "line": 1, "column": 1, "errorType": "ImportError"}], "call_graph": None}
@@ -26,26 +27,23 @@ except Exception as e: # 다른 종류의 import 에러
     sys.exit(1)
 
 def main():
-    # main 함수 전체를 try...except로 감싸서 모든 예외 로깅
     try:
         code = sys.stdin.read()
         mode = sys.argv[1] if len(sys.argv) > 1 else 'realtime'
 
         # 동적 분석은 별도 처리
         if mode == 'dynamic':
-            # TODO: dynamic_analyze.py 실행 또는 관련 로직 호출
             print(json.dumps({"errors": [{"message": "Dynamic analysis not implemented", "line": 1, "column": 1, "errorType": "NotImplementedError"}], "call_graph": None}))
             return
 
-        # core.py의 analyze_code 직접 호출
         try:
+            # parso 기반 analyze_code 호출
             analysis_result = analyze_code(code, mode=mode)
         except Exception as e:
             print(f"Critical error during analyze_code call: {e}", file=sys.stderr)
             traceback.print_exc(file=sys.stderr)
             analysis_result = {"errors": [{"message": f"Critical error during analysis: {e}", "line": 1, "column": 1, "errorType": "CoreAnalysisError"}], "call_graph": None}
 
-        # 결과 출력
         print(json.dumps(analysis_result))
 
     except Exception as e:
