@@ -1,30 +1,25 @@
 # core.py
-# core.py
-import astroid
+import parso # astroid 대신 parso 사용
 import sys
 import networkx as nx
 from typing import List, Dict, Any, Set, Tuple, Optional, Union
-import re
-# utils.py 함수 사용 (get_type, is_compatible, collect_defined_variables)
+# parso 기반으로 수정된 utils 함수 사용
 from utils import collect_defined_variables, get_type, is_compatible
-# checkers 모듈에서 체커 클래스 목록과 BaseChecker import
+# parso 기반으로 수정된 checkers 모듈 사용
 from checkers import RT_CHECKERS_CLASSES, STATIC_CHECKERS_CLASSES, BaseChecker
 # networkx JSON 변환 import
 from networkx.readwrite import json_graph
-import traceback # 상세 예외 로깅
+import traceback
 
 class Linter:
-    """AST를 순회하며 등록된 체커를 실행하고 결과를 수집하는 클래스."""
+    """AST를 순회하며 등록된 체커를 실행하고 결과를 수집하는 클래스 (parso 기반)."""
     def __init__(self, mode='realtime'):
         print(f"[Linter.__init__] Initializing Linter for mode: {mode}", file=sys.stderr)
         self.mode = mode
         self.checkers: List[BaseChecker] = []
         self.errors: List[Dict[str, Any]] = []
         self.call_graph = nx.DiGraph()
-        # 스코프 노드 스택 (astroid 노드 객체 저장)
-        self.current_scope_stack: List[Union[astroid.Module, astroid.FunctionDef, astroid.ClassDef, astroid.Lambda]] = []
-        # 스코프별 정의된 변수 (노드 객체를 키로 사용)
-        self.scope_defined_vars: Dict[astroid.NodeNG, Set[str]] = {}
+        self.current_node: Optional[parso.tree.BaseNode] = None # 현재 방문 노드 (스코프 변수 조회용)
         self._load_checkers()
 
     def _load_checkers(self):
@@ -40,52 +35,26 @@ class Linter:
                  error_msg = f"Error initializing checker {checker_class.__name__}: {e}"
                  print(error_msg, file=sys.stderr)
                  # 내부 오류로 추가 (선택적)
-                 self.errors.append({'message': error_msg, 'line': 1, 'column': 0, 'errorType': 'CheckerInitError', '_key': ('CheckerInitError', 1, 0, 1, 1)})
+                 # 초기화 오류 시에도 일관된 오류 객체 사용 고려
+                 error_node_mock = type('obj', (object,), {'start_pos': (1,0), 'end_pos': (1,1)})() # 임시 위치
+                 self.add_message('CheckerInitError', error_node_mock, error_msg)
 
 
-    def add_message(self, msg_id: str, node: astroid.NodeNG, message: str):
-        """체커가 오류 메시지를 추가할 때 사용하는 메서드 (중복 방지 포함)."""
-        # --- SyntaxError 예외 객체 특수 처리 ---
-        if isinstance(node, astroid.AstroidSyntaxError):
-            # Extract line number from error message
-            msg = str(node)
-            match = re.search(r'line (\d+)', msg)
-            line_num = int(match.group(1)) if match else 1
-            col_num = getattr(node, 'col_offset', 0) or 0
-            error_key = (self.MSG_ID if hasattr(self, 'MSG_ID') else msg_id, line_num, col_num, line_num, col_num + 1)
-            if not any(err.get('_key') == error_key for err in self.errors):
-                error_info = {
-                    'message': f"SyntaxError: {msg}",
-                    'line': line_num,
-                    'column': col_num,
-                    'to_line': line_num,
-                    'end_column': col_num + 1,
-                    'errorType': 'SyntaxError',
-                    '_key': error_key
-                }
-                self.errors.append(error_info)
-            return
-        try: # 노드 속성 접근 시 오류 방지
-            line = getattr(node, 'fromlineno', None) or getattr(node, 'lineno', 1) or 1
-            col = getattr(node, 'col_offset', 0) or 0
-            if col is None: col = 0
-
-            to_line = getattr(node, 'tolineno', line) or line
-            end_col = getattr(node, 'end_col_offset', None)
-
-            # SyntaxError 예외 객체 처리
-            if msg_id == 'SyntaxError' and isinstance(node, astroid.AstroidSyntaxError):
-                line = node.lineno or 1
-                col = node.col or 0 # astroid.AstroidSyntaxError는 col 속성 사용
-                to_line = line
-                end_col = col + 1 # SyntaxError는 보통 한 지점
-            elif end_col is None or end_col <= col: # 일반 노드의 end_col_offset이 없을 경우
-                 end_col = col + 1 # 최소 1 문자 길이
-
+    def add_message(self, msg_id: str, node: parso.tree.BaseNode, message: str):
+        """체커가 오류 메시지를 추가할 때 사용하는 메서드 (parso 노드)."""
+        try:
+            # parso 노드의 위치 정보 사용 (start_pos, end_pos)
+            line, col = node.start_pos
+            to_line, end_col = node.end_pos
+            # end_pos는 exclusive일 수 있으므로, 1문자 길이를 위해 조정 필요 시 고려
+            # 하지만 일반적으로 에디터에서 밑줄은 start_pos 기준으로 그리는 경우가 많음
             line = max(1, line); col = max(0, col)
-            to_line = max(line, to_line); end_col = max(col + 1, end_col)
+            to_line = max(line, to_line); end_col = max(col + 1, end_col) # 최소 1문자 폭 보장
 
-            error_key = (msg_id, line, col, to_line, end_col)
+            # SyntaxError는 파싱 단계에서 별도 처리됨 (이 함수 호출 안 됨)
+            if msg_id == 'SyntaxError': msg_id = 'InternalError' # 혹시 모르니 변경
+
+            error_key = (msg_id, line, col, to_line, end_col) # 중복 방지 키
 
             if not any(err.get('_key') == error_key for err in self.errors):
                 error_info = {
@@ -94,13 +63,17 @@ class Linter:
                     'errorType': msg_id, '_key': error_key
                 }
                 self.errors.append(error_info)
-                print(f"[Linter.add_message] Added: {msg_id} at L{line}:C{col} - {message}", file=sys.stderr)
+                # print(f"[Linter.add_message] Added: {msg_id} at L{line}:C{col}-L{to_line}:C{end_col} - {message}", file=sys.stderr)
         except Exception as e:
-             print(f"Error adding message for node {node!r}: {e}", file=sys.stderr)
-             traceback.print_exc(file=sys.stderr)
+             print(f"Error adding message for parso node {node!r}: {e}", file=sys.stderr)
+             # 오류 발생 시에도 최소한의 정보 추가 시도
+             fallback_key = (msg_id, 1, 0, 1, 1)
+             if not any(err.get('_key') == fallback_key for err in self.errors):
+                  fallback_info = {'message': message, 'line': 1, 'column': 0, 'to_line': 1, 'end_column': 1, 'errorType': msg_id, '_key': fallback_key}
+                  self.errors.append(fallback_info)
 
 
-    # --- 그래프 관련 메서드 ---
+    # --- 그래프 관련 메서드 (parso 기반으로 수정) ---
     def add_node_to_graph(self, node_name: str, **kwargs):
         """호출 그래프에 노드를 추가/업데이트합니다."""
         if not isinstance(node_name, str) or not node_name: return
@@ -131,110 +104,101 @@ class Linter:
              if call_site_line is not None: edge_data['call_sites'] = [call_site_line]
              self.call_graph.add_edge(caller, callee, **edge_data)
 
-    # --- 스코프 관리 ---
-    def enter_scope(self, node: Union[astroid.Module, astroid.FunctionDef, astroid.ClassDef, astroid.Lambda]):
-        """새로운 스코프 진입."""
-        scope_name = node.name if hasattr(node, 'name') else type(node).__name__
-        print(f"[Linter.enter_scope] Entering scope: {scope_name}", file=sys.stderr)
-        self.current_scope_stack.append(node)
-        self.scope_defined_vars[node] = collect_defined_variables(node)
-        print(f"  [enter_scope] Defined vars in {scope_name}: {self.scope_defined_vars.get(node, 'N/A')}", file=sys.stderr)
-        for checker in self.checkers:
-             if hasattr(checker, 'handle_function_entry') and isinstance(node, astroid.FunctionDef):
-                  try: checker.handle_function_entry(node)
-                  except Exception as e: print(f"Error in checker {checker.__class__.__name__}.handle_function_entry: {e}", file=sys.stderr)
-
-    def leave_scope(self, node: Union[astroid.Module, astroid.FunctionDef, astroid.ClassDef, astroid.Lambda]):
-        """스코프 탈출."""
-        scope_name = node.name if hasattr(node, 'name') else type(node).__name__
-        print(f"[Linter.leave_scope] Leaving scope: {scope_name}", file=sys.stderr)
-        if self.current_scope_stack and self.current_scope_stack[-1] == node:
-             self.current_scope_stack.pop()
-        else: print(f"Warning: Scope stack mismatch when leaving node {node!r}", file=sys.stderr)
-        if node in self.scope_defined_vars: del self.scope_defined_vars[node]
-        for checker in self.checkers:
-             if hasattr(checker, 'handle_function_exit') and isinstance(node, astroid.FunctionDef):
-                  try: checker.handle_function_exit(node)
-                  except Exception as e: print(f"Error in checker {checker.__class__.__name__}.handle_function_exit: {e}", file=sys.stderr)
-
+    # --- 스코프 관리 (parso API 사용) ---
     def get_current_scope_variables(self) -> Set[str]:
-        """현재 스코프에서 정의된 변수 집합 반환."""
-        if self.current_scope_stack:
-             current_scope_node = self.current_scope_stack[-1]
-             return self.scope_defined_vars.get(current_scope_node, set())
+        """현재 방문 중인 노드의 스코프에서 정의된 변수 반환."""
+        if self.current_node:
+             try:
+                 # 현재 노드 또는 부모 스코프에서 정의된 변수 가져오기
+                 # parso에서 스코프 경계는 Function, Class, Lambda, Module
+                 scope = self.current_node
+                 while scope and scope.type not in ('funcdef', 'classdef', 'lambdef', 'file_input', 'module'): # file_input/module이 최상위
+                       scope = scope.parent
+                 if scope:
+                     return collect_defined_variables(scope) # utils 함수 호출
+                 else: # 스코프를 찾지 못한 경우 (이론상 발생 어려움)
+                      print(f"Warning: Could not find parent scope for node {self.current_node!r}", file=sys.stderr)
+
+             except Exception as e:
+                  print(f"Error getting scope variables for node {self.current_node!r}: {e}", file=sys.stderr)
         return set()
 
-    # --- AST 순회 및 분석 실행 ---
-    def visit_node(self, node: astroid.NodeNG):
-         """AST 노드를 방문하여 그래프 생성 및 체커 실행."""
-         print(f"[Linter.visit_node] Visiting node: {node.__class__.__name__} at L{getattr(node, 'lineno', '?')}", file=sys.stderr)
-         # 1. 스코프 진입 처리
-         is_scope_node = isinstance(node, (astroid.FunctionDef, astroid.Module, astroid.ClassDef, astroid.Lambda))
-         if is_scope_node:
-              self.enter_scope(node)
 
-         # 2. 그래프 생성 로직 (static 모드에서만)
+    # --- AST 순회 및 분석 실행 (parso 노드 순회) ---
+    def visit_node(self, node: parso.tree.BaseNode): # 타입 BaseNode로 변경
+         """parso AST 노드를 방문하여 그래프 생성 및 체커 실행."""
+         self.current_node = node # 현재 노드 업데이트
+         # print(f"[Linter.visit_node] Visiting node: {node.type} at L{node.start_pos[0]}", file=sys.stderr) # 로그 필요시 활성화
+
+         # 1. 그래프 생성 로직 (static 모드)
          if self.mode == 'static':
              try:
-                 if isinstance(node, astroid.FunctionDef):
-                     func_name = node.name; caller = self.current_scope_stack[-2].name if len(self.current_scope_stack) > 1 and hasattr(self.current_scope_stack[-2], 'name') else '<module>'
-                     self.add_node_to_graph(func_name, type='function', lineno=node.lineno)
-                     if caller == '<module>': self.add_edge_to_graph(caller, func_name, type='defines', lineno=node.lineno)
-                 elif isinstance(node, astroid.Call):
-                     caller_node = self.current_scope_stack[-1] if self.current_scope_stack else None
-                     caller = caller_node.name if caller_node and hasattr(caller_node, 'name') else '<module>'
-                     called_func_name = None; call_type = 'calls'
-                     if isinstance(node.func, astroid.Name): called_func_name = node.func.name; call_type = 'calls'
-                     elif isinstance(node.func, astroid.Attribute):
-                         call_type = 'calls_method'
-                         try: called_func_name = f"{node.func.expr.as_string()}.{node.func.attrname}"
-                         except Exception: called_func_name = f"?.{node.func.attrname}"
-                     if called_func_name and caller: self.add_edge_to_graph(caller, called_func_name, type=call_type, lineno=node.lineno)
-                 elif isinstance(node, astroid.ClassDef):
-                      class_name = node.name; caller = self.current_scope_stack[-2].name if len(self.current_scope_stack) > 1 and hasattr(self.current_scope_stack[-2], 'name') else '<module>'
-                      self.add_node_to_graph(class_name, type='class', lineno=node.lineno)
-                      if caller == '<module>': self.add_edge_to_graph(caller, class_name, type='defines_class', lineno=node.lineno)
-             except Exception as e: print(f"Error during graph building for node {node!r}: {e}", file=sys.stderr)
+                 if node.type == 'funcdef':
+                      func_name = node.name.value # parso Name 노드의 값
+                      caller_scope = node.get_parent_scope(); caller = getattr(caller_scope, 'name', None) # 부모 스코프 이름 시도
+                      caller = getattr(caller, 'value', '<module>') # 이름 노드의 실제 값 또는 모듈
+                      self.add_node_to_graph(func_name, type='function', lineno=node.start_pos[0])
+                      if caller == '<module>': self.add_edge_to_graph(caller, func_name, type='defines', lineno=node.start_pos[0])
+                 elif node.type == 'atom_expr' and len(node.children) > 1 and node.children[1].type == 'trailer' and node.children[1].children[0].value == '(': # 함수 호출
+                      caller_scope = node.get_parent_scope(); caller = getattr(caller_scope, 'name', None)
+                      caller = getattr(caller, 'value', '<module>')
+                      func_part = node.children[0]; called_func_name = None; call_type = 'calls'
+                      if func_part.type == 'name': called_func_name = func_part.value
+                      elif func_part.type == 'power' and len(func_part.children)>1 and func_part.children[1].type == 'trailer' and func_part.children[1].children[0].value == '.': # 메서드 호출
+                          call_type = 'calls_method'
+                          attr_name_node = func_part.children[1].children[1]
+                          if attr_name_node.type == 'name':
+                               obj_expr_str = func_part.children[0].get_code(include_prefix=False).strip()
+                               called_func_name = f"{obj_expr_str}.{attr_name_node.value}"
+                      if called_func_name and caller: self.add_edge_to_graph(caller, called_func_name, type=call_type, lineno=node.start_pos[0])
+                 elif node.type == 'classdef': # 클래스 정의
+                      class_name = node.name.value; caller_scope = node.get_parent_scope(); caller = getattr(caller_scope, 'name', None)
+                      caller = getattr(caller, 'value', '<module>')
+                      self.add_node_to_graph(class_name, type='class', lineno=node.start_pos[0])
+                      if caller == '<module>': self.add_edge_to_graph(caller, class_name, type='defines_class', lineno=node.start_pos[0])
+             except Exception as e: print(f"Error building graph for parso node {node!r}: {e}", file=sys.stderr)
 
-         # 3. 등록된 체커 실행
-         node_type = type(node)
+         # 2. 등록된 체커 실행
+         node_type_str = node.type
          for checker in self.checkers:
-             if not checker.node_types or node_type in checker.node_types:
-                 if hasattr(checker, 'check'):
-                     try: checker.check(node)
-                     except Exception as e:
-                          print(f"Error in checker {checker.__class__.__name__} for node {node!r}: {e}", file=sys.stderr)
-                          traceback.print_exc(file=sys.stderr)
+             if not checker.node_types or node_type_str in checker.node_types:
+                 # check_<nodetype> 메서드 호출
+                 check_method_name = f'check_{node_type_str}'
+                 visitor_method = getattr(checker, check_method_name, None)
+                 if visitor_method and callable(visitor_method):
+                     try: visitor_method(node)
+                     except Exception as e: print(f"Error in checker {checker.__class__.__name__}.{check_method_name}: {e}", file=sys.stderr); traceback.print_exc(file=sys.stderr)
 
-         # 4. 자식 노드 재귀 방문
-         for child in node.get_children():
-             self.visit_node(child)
+         # 3. 자식 노드 재귀 방문 (Leaf가 아닌 경우만)
+         if hasattr(node, 'children'):
+             for child in node.children:
+                 self.visit_node(child)
 
-         # 5. 스코프 종료 처리
-         if is_scope_node:
-              self.leave_scope(node)
 
-    def analyze(self, tree: astroid.Module):
-        """AST를 순회하며 분석을 수행합니다."""
-        self.errors = []
-        self.call_graph = nx.DiGraph()
-        self.current_scope_stack = [] # 스택 초기화
-        self.scope_defined_vars = {}
+    def analyze(self, tree: parso.python.tree.Module):
+        """parso AST를 순회하며 분석을 수행합니다."""
+        self.errors = [] # 오류 초기화
+        self.call_graph = nx.DiGraph() # 그래프 초기화
+        self.current_node = None
 
-        print("[Linter.analyze] Starting analysis and graph building...", file=sys.stderr)
-        # 모듈 노드를 첫 스코프로 시작
-        self.visit_node(tree)
-        print("[Linter.analyze] Analysis and graph building finished.", file=sys.stderr)
+        print("[Linter.analyze] Starting analysis (parso)...", file=sys.stderr)
+        try:
+            self.visit_node(tree) # AST 순회 시작
+        except Exception as e:
+            print(f"!!! Exception during AST traversal: {e}", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
+            # 순회 오류 시 에러 추가
+            error_node_mock = type('obj', (object,), {'start_pos': (1,0), 'end_pos': (1,1)})()
+            self.add_message('AnalysisError', error_node_mock , f"An error occurred during AST traversal: {e}")
+        print("[Linter.analyze] Analysis finished (parso).", file=sys.stderr)
 
-        # --- 함수 단위 체커 실행 (Recursion 등) ---
+        # 함수 단위 체커 실행 (Recursion 등) - parso 기반 수정 필요
         if self.mode == 'static':
-            recursion_checker_found = False
-            for checker in self.checkers:
+             for checker in self.checkers:
                  if hasattr(checker, 'check_function_recursion'):
-                      recursion_checker_found = True
                       print(f"[Linter.analyze] Running checker {checker.__class__.__name__} for function recursion.", file=sys.stderr)
                       try:
-                          for func_node in tree.nodes_of_class(astroid.FunctionDef):
+                          for func_node in tree.iter_funcdefs(): # parso 함수 찾기
                                checker.check_function_recursion(func_node)
                       except Exception as e: print(f"Error in recursion checker {checker.__class__.__name__}: {e}", file=sys.stderr)
 
@@ -245,57 +209,66 @@ class Linter:
              except Exception as e: print(f"Error removing <module> node from graph: {e}", file=sys.stderr)
 
 
-# --- analyze_code 함수 (Linter 사용 및 SyntaxError 처리 수정) ---
+# --- analyze_code 함수 (parso 사용) ---
 def analyze_code(code: str, mode: str = 'realtime') -> Dict[str, Any]:
-    print(f"analyze_code (Linter based) called with mode: {mode}", file=sys.stderr)
-    errors = []
+    print(f"analyze_code (parso based) called with mode: {mode}", file=sys.stderr)
+    syntax_errors = [] # SyntaxError만 저장할 리스트
+    runtime_errors = [] # Linter가 찾은 런타임 오류 저장 리스트
     call_graph_data = None
-    linter = Linter(mode=mode) # Linter 생성
+    linter = Linter(mode=mode) # Linter는 항상 생성
+    tree: Optional[parso.python.tree.Module] = None
 
     try:
-        tree = astroid.parse(code)
-        print(f"AST parsed successfully", file=sys.stderr)
-        linter.analyze(tree)     # 분석 실행
-        errors = linter.errors
+        # 1. parso로 파싱, 오류 정보 수집
+        # error_recovery=True (기본값)로 오류 있어도 계속 파싱
+        grammar = parso.load_grammar()
+        tree = grammar.parse(code)
+        print(f"Parso AST parsed (potentially with errors)", file=sys.stderr)
 
-        if mode == 'static':
-             try:
-                 # networkx가 import 되어 있다고 가정
-                 call_graph_data = json_graph.node_link_data(linter.call_graph)
-                 print("[analyze_code] Call graph converted to JSON.", file=sys.stderr)
-             except ImportError:
-                 print("Error: networkx library not found for JSON conversion.", file=sys.stderr)
-             except Exception as e:
-                 print(f"Error converting graph to JSON: {e}", file=sys.stderr)
+        # 파싱 오류(SyntaxError) 수집
+        for error in grammar.iter_errors(tree):
+             line, col = error.start_pos
+             to_line, end_col = error.end_pos
+             syntax_errors.append({
+                 'message': f"SyntaxError: {error.message}",
+                 'line': line, 'column': col, 'to_line': to_line, 'end_column': end_col,
+                 'errorType': 'SyntaxError'
+             })
+        print(f"Found {len(syntax_errors)} syntax errors during parsing.", file=sys.stderr)
 
-    except astroid.AstroidSyntaxError as e:
-        print(f"!!! Caught SyntaxError in analyze_code: {e}", file=sys.stderr)
-        # --- 수정: str(e) 또는 e.args 사용 ---
-        syntax_error_message = str(e) # 예외 객체 자체를 문자열로 변환
-        # 또는 더 구체적으로: syntax_error_message = e.args[0] if e.args else "Unknown syntax error"
-
-        # line, col 정보는 예외 객체에서 가져오기
-        # linter.add_message 호출 시 node 인자로 예외 객체 e 전달
-        linter.add_message('SyntaxError', e, f"SyntaxError: {syntax_error_message}")
-        errors = linter.errors # 업데이트된 오류 목록 가져오기
-        call_graph_data = None
-        # ------------------------------------
-    except Exception as e:
-        print(f"!!! Exception during analysis in analyze_code: {e}", file=sys.stderr)
+    except Exception as e: # parso 파싱 자체의 심각한 예외
+        print(f"!!! Exception during parso parsing: {e}", file=sys.stderr)
         traceback.print_exc(file=sys.stderr)
-        # 임시 노드 대신 기본 위치 정보 사용
-        linter.add_message('AnalysisError', e, f"An error occurred during analysis: {e}") # 노드로 e 전달 시도
-        errors = linter.errors
-        call_graph_data = None
+        syntax_errors.append({'message': f"An error occurred during parsing: {e}", 'line': 1, 'column': 0, 'errorType': 'AnalysisError'})
+        tree = None # 파싱 실패
 
-    # 오류 객체에서 내부 키(_key) 제거
-    cleaned_errors = [{k: v for k, v in err.items() if k != '_key'} for err in errors]
+    # 2. Linter 분석 실행 (파싱 성공 여부와 관계없이 시도 - tree가 None일 수 있음)
+    if tree is not None:
+        try:
+            print("[analyze_code] Starting Linter analysis (parso tree)...", file=sys.stderr)
+            linter.analyze(tree) # 불완전한 트리라도 분석 시도
+            print("[analyze_code] Linter analysis finished (parso tree).", file=sys.stderr)
+            runtime_errors = linter.errors # Linter 오류 저장
 
+            # 그래프 데이터 생성 (static 모드)
+            if mode == 'static':
+                try:
+                    call_graph_data = json_graph.node_link_data(linter.call_graph)
+                    print("[analyze_code] Call graph converted to JSON.", file=sys.stderr)
+                except ImportError: print("Error: networkx library not found...", file=sys.stderr)
+                except Exception as e: print(f"Error converting graph to JSON: {e}", file=sys.stderr); call_graph_data = None
+        except Exception as e: # Linter 분석 중 예외
+            print(f"!!! Exception during Linter analysis (parso): {e}", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
+            runtime_errors.append({'message': f"An error occurred during Linter analysis: {e}",'line': 1,'column': 0, 'errorType': 'AnalysisError'})
+
+    # 3. SyntaxError와 Linter 오류 합치기
+    all_errors = syntax_errors + runtime_errors
+
+    # 오류 객체에서 내부 키(_key) 제거 (add_message에서 추가한 경우)
+    cleaned_errors = [{k: v for k, v in err.items() if k != '_key'} for err in all_errors]
     result = {'errors': cleaned_errors, 'call_graph': call_graph_data}
 
-    if not isinstance(result.get('errors'), list):
-        print("Critical Error: 'errors' is not a list before returning!", file=sys.stderr)
-        result['errors'] = []
-
+    if not isinstance(result.get('errors'), list): result['errors'] = []
     print(f"analyze_code returning result with {len(result['errors'])} errors.", file=sys.stderr)
     return result
