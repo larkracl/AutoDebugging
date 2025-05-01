@@ -230,7 +230,7 @@ def analyze_code(code: str, mode: str = 'realtime') -> Dict[str, Any]:
              line, col = error.start_pos
              to_line, end_col = error.end_pos
              syntax_errors.append({
-                 'message': f"SyntaxError: {error.message}",
+                 'message': f"{error.message}",
                  'line': line, 'column': col, 'to_line': to_line, 'end_column': end_col,
                  'errorType': 'SyntaxError'
              })
