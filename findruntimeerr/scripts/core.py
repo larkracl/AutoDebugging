@@ -1,17 +1,9 @@
 # core.py
-<<<<<<< Updated upstream
-import astroid
-import sys
-import networkx as nx
-from typing import List, Dict, Any, Set, Tuple, Optional, Union
-# utils.py 함수 사용 (get_type, is_compatible, collect_defined_variables)
-=======
 import parso # astroid 대신 parso 사용
 import sys
 import networkx as nx
 from typing import List, Dict, Any, Set, Tuple, Optional, Union
 # parso 기반으로 수정된 utils 함수 사용
->>>>>>> Stashed changes
 from utils import collect_defined_variables, get_type, is_compatible
 # parso 기반으로 수정된 checkers 모듈 사용
 from checkers import RT_CHECKERS_CLASSES, STATIC_CHECKERS_CLASSES, BaseChecker
@@ -48,27 +40,6 @@ class Linter:
                  self.add_message('CheckerInitError', error_node_mock, error_msg)
 
 
-<<<<<<< Updated upstream
-    def add_message(self, msg_id: str, node: astroid.NodeNG, message: str):
-        """체커가 오류 메시지를 추가할 때 사용하는 메서드 (중복 방지 포함)."""
-        try: # 노드 속성 접근 시 오류 방지
-            line = getattr(node, 'fromlineno', None) or getattr(node, 'lineno', 1) or 1
-            col = getattr(node, 'col_offset', 0) or 0
-            if col is None: col = 0
-
-            to_line = getattr(node, 'tolineno', line) or line
-            end_col = getattr(node, 'end_col_offset', None)
-
-            # SyntaxError 예외 객체 처리
-            if msg_id == 'SyntaxError' and isinstance(node, astroid.AstroidSyntaxError):
-                line = node.lineno or 1
-                col = node.col or 0 # astroid.AstroidSyntaxError는 col 속성 사용
-                to_line = line
-                end_col = col + 1 # SyntaxError는 보통 한 지점
-            elif end_col is None or end_col <= col: # 일반 노드의 end_col_offset이 없을 경우
-                 end_col = col + 1 # 최소 1 문자 길이
-
-=======
     def add_message(self, msg_id: str, node: parso.tree.BaseNode, message: str):
         """체커가 오류 메시지를 추가할 때 사용하는 메서드 (parso 노드)."""
         try:
@@ -77,7 +48,6 @@ class Linter:
             to_line, end_col = node.end_pos
             # end_pos는 exclusive일 수 있으므로, 1문자 길이를 위해 조정 필요 시 고려
             # 하지만 일반적으로 에디터에서 밑줄은 start_pos 기준으로 그리는 경우가 많음
->>>>>>> Stashed changes
             line = max(1, line); col = max(0, col)
             to_line = max(line, to_line); end_col = max(col + 1, end_col) # 최소 1문자 폭 보장
 
