@@ -3,13 +3,6 @@ import json
 import traceback
 import astroid
 import os
-<<<<<<< Updated upstream
-import requests
-
-# Configuration for Gemini free API
-GEMINI_API_URL = "https://api.gemini.com/v1/generate"
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-=======
 import re
 
 from google import genai
@@ -34,7 +27,6 @@ if os.path.exists(properties_file):
 GEMINI_API_KEY = api_key or os.getenv("GEMINI_API_KEY")
 
 client = genai.Client(api_key=GEMINI_API_KEY)
->>>>>>> Stashed changes
 
 def parse_functions(code: str):
     """
@@ -75,11 +67,6 @@ def generate_test_cases(func_name, comment):
     """
     Gemini API를 이용해 함수별 10개의 테스트케이스 생성 요청.
     """
-<<<<<<< Updated upstream
-    if not GEMINI_API_KEY:
-        raise RuntimeError("GEMINI_API_KEY not set in environment")
-=======
->>>>>>> Stashed changes
     prompt = (
         "You are a helpful assistant that outputs test cases in pure JSON format only.\n"
         "Do NOT include any explanations, markdown, or code fences—only the JSON array.\n"
@@ -98,25 +85,6 @@ def generate_test_cases(func_name, comment):
         f"Use the function’s comment/description to guide the cases:\n"
         f"{comment}\n"
     )
-<<<<<<< Updated upstream
-    headers = {
-        "Authorization": f"Bearer {GEMINI_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "prompt": prompt,
-        "max_tokens": 512,
-        "n": 1
-    }
-    resp = requests.post(GEMINI_API_URL, headers=headers, json=payload, timeout=10)
-    resp.raise_for_status()
-    body = resp.json()
-    text = body.get("data", [{}])[0].get("generated_text", "")
-    try:
-        cases = json.loads(text)
-    except Exception:
-        # 파싱 실패 시 빈 리스트 반환
-=======
 
     print(f"[Gemini] Prompt for `{func_name}`: {prompt}", file=sys.stderr)
     # 새 Gemini API 클라이언트 사용
@@ -135,7 +103,6 @@ def generate_test_cases(func_name, comment):
         cases = json.loads(raw)
     except Exception as e:
         print(f"[Gemini] Failed to parse JSON for `{func_name}`: {e}", file=sys.stderr)
->>>>>>> Stashed changes
         cases = []
     return cases
 
