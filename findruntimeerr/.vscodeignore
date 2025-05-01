@@ -11,3 +11,4 @@ vsc-extension-quickstart.md
 **/.vscode-test.*
 secret.properties
 *.pyc
+__pycache__/

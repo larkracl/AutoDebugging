@@ -1,5 +1,6 @@
 
 .DS_Store
-*.pyc
 findruntimeerr/.venv/bin/Activate.ps1
 findruntimeerr/secret.properties
+*.pyc
+__pycache__/
