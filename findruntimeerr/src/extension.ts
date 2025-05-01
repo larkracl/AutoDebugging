@@ -951,6 +951,17 @@ const editor = vscode.window.activeTextEditor;
         runDynamicAnalysisProcess(editor.document.getText(), editor.document.uri)
           .then((result) => {
             handleAnalysisResult(editor.document.uri, config, result, "dynamic");
+            // Function-level error summary
+            const summaryCounts: { [fn: string]: number } = {};
+            result.errors.forEach(err => {
+              const match = err.message.match(/Function `(.+?)` failed/);
+              const fn = match ? match[1] : 'unknown';
+              summaryCounts[fn] = (summaryCounts[fn] || 0) + 1;
+            });
+            outputChannel.appendLine('[Dynamic Analysis Summary]');
+            for (const [fn, cnt] of Object.entries(summaryCounts)) {
+              outputChannel.appendLine(`  ${fn}: ${cnt} error(s)`);
+            }
             vscode.window.showInformationMessage(
               `FindRuntimeErr: Dynamic analysis completed. ${result.errors.length} error(s) found.`
             );

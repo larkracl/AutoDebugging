@@ -3,12 +3,9 @@ import json
 import traceback
 import astroid
 import os
-import requests  # remove this line
+import re
 
-# Google GenAI client for Gemini API
-import base64
 from google import genai
-from google.genai import types
 
 # Load API key from secret.properties if present, else from environment
 script_dir = os.path.dirname(__file__)
@@ -29,20 +26,30 @@ if os.path.exists(properties_file):
         pass
 GEMINI_API_KEY = api_key or os.getenv("GEMINI_API_KEY")
 
-# Configuration for Gemini free API
-GEMINI_API_URL = "https://api.gemini.com/v1/generate"
+client = genai.Client(api_key=GEMINI_API_KEY)
 
 def parse_functions(code: str):
     """
     AST를 사용해 코드에서 함수 정의를 추출하고, 각 함수의 코드, 주석, 의존성을 반환합니다.
     """
     module = astroid.parse(code)
+    # Prepare raw code lines for inline comment extraction
+    code_lines = code.splitlines()
     functions = {}
     for node in module.body:
         if isinstance(node, astroid.FunctionDef):
             name = node.name
+            # Extract inline comment after function signature, if any
+            inline_comment = ""
+            def_line_idx = node.lineno - 1
+            if 0 <= def_line_idx < len(code_lines):
+                line_text = code_lines[def_line_idx]
+                if "#" in line_text:
+                    inline_comment = line_text.split("#", 1)[1].strip()
             # 함수 docstring 또는 주석 추출
             comment = node.doc_node.value if node.doc_node else ""
+            # Use docstring comment if present, else inline comment
+            comment = comment or inline_comment
             func_code = node.as_string()
             functions[name] = {"code": func_code, "comment": comment, "node": node}
 
@@ -60,40 +67,40 @@ def generate_test_cases(func_name, comment):
     """
     Gemini API를 이용해 함수별 10개의 테스트케이스 생성 요청.
     """
-    # Use Google GenAI client for Gemini API
-    client = genai.Client(
-        vertexai=True,
-        project="",    # TODO: set your project ID or read from config
-        location="",   # TODO: set your location or read from config
-    )
-    model = "gemini-2.5-flash-preview-04-17"
     prompt = (
-        f"Generate exactly 10 test cases for the Python function `{func_name}`.\n"
-        f"Description/comment: {comment}\n"
-        "Return a JSON array of objects with fields: `input` (list of args) and `expected`."
+        "You are a helpful assistant that outputs test cases in pure JSON format only.\n"
+        "Do NOT include any explanations, markdown, or code fences—only the JSON array.\n"
+        "Each element in the array must be an object with two keys:\n"
+        "  - \"input\": a JSON array of argument values for the function\n"
+        "  - \"expected\": the expected return value for that input\n"
+        "\n"
+        "For example:\n"
+        "[\n"
+        "  {\"input\": [1, 2], \"expected\": 3},\n"
+        "  {\"input\": [0, 5], \"expected\": 5},\n"
+        "  {\"input\": [-1, -1], \"expected\": -2}\n"
+        "]\n"
+        "\n"
+        f"Now, generate exactly 10 test cases for the Python function `{func_name}`.\n"
+        f"Use the function’s comment/description to guide the cases:\n"
+        f"{comment}\n"
     )
+
     print(f"[Gemini] Prompt for `{func_name}`: {prompt}", file=sys.stderr)
-    contents = [
-        types.Content(
-            role="user",
-            parts=[
-                types.Part.from_text(text=prompt),
-            ],
-        ),
-    ]
-    generate_content_config = types.GenerateContentConfig(
-        response_mime_type="text/plain",
+    # 새 Gemini API 클라이언트 사용
+    response = client.models.generate_content(
+        model="gemini-2.0-flash",
+        contents=prompt,
     )
-    text = ""
-    for chunk in client.models.generate_content_stream(
-        model=model,
-        contents=contents,
-        config=generate_content_config,
-    ):
-        text += chunk.text
-        print(f"[Gemini] Stream chunk for `{func_name}`: {chunk.text}", file=sys.stderr)
+    print(f"[Gemini] Response for `{func_name}`: {response.text}", file=sys.stderr)
+    # --- Clean Gemini response before parsing ---
+    raw = response.text.strip()
+    # Remove Markdown code fences like ```json
+    raw = re.sub(r"^```(?:json)?\s*", "", raw)
+    raw = re.sub(r"\s*```$", "", raw)
+    print(f"[Gemini] Cleaned response for `{func_name}`: {raw}", file=sys.stderr)
     try:
-        cases = json.loads(text)
+        cases = json.loads(raw)
     except Exception as e:
         print(f"[Gemini] Failed to parse JSON for `{func_name}`: {e}", file=sys.stderr)
         cases = []
