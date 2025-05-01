@@ -91,7 +91,6 @@ def generate_test_cases(func_name, comment):
         model="gemini-2.0-flash",
         contents=prompt,
     )
-    print(f"[Gemini] Response for `{func_name}`: {response.text}", file=sys.stderr)
     # --- Clean Gemini response before parsing ---
     raw = response.text.strip()
     # Remove Markdown code fences like ```json
