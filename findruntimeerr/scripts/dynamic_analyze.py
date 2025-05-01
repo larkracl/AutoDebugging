@@ -81,12 +81,11 @@ def generate_test_cases(func_name, comment):
         "  {\"input\": [-1, -1], \"expected\": -2}\n"
         "]\n"
         "\n"
+        "Do NOT use single quotes—only valid JSON with double quotes.\n"
         f"Now, generate exactly 10 test cases for the Python function `{func_name}`.\n"
         f"Use the function’s comment/description to guide the cases:\n"
         f"{comment}\n"
     )
-
-    print(f"[Gemini] Prompt for `{func_name}`: {prompt}", file=sys.stderr)
     # 새 Gemini API 클라이언트 사용
     response = client.models.generate_content(
         model="gemini-2.0-flash",
@@ -98,6 +97,7 @@ def generate_test_cases(func_name, comment):
     # Remove Markdown code fences like ```json
     raw = re.sub(r"^```(?:json)?\s*", "", raw)
     raw = re.sub(r"\s*```$", "", raw)
+    raw = re.sub(r"'([^']*)'", r'"\1"', raw)
     print(f"[Gemini] Cleaned response for `{func_name}`: {raw}", file=sys.stderr)
     try:
         cases = json.loads(raw)
