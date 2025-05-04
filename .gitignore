@@ -2,3 +2,5 @@
 .DS_Store
 *.pyc
 findruntimeerr/.venv/bin/Activate.ps1
+secret.properties
+testFixture/**
