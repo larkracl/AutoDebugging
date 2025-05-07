@@ -1,89 +1,41 @@
 # checkers.py (Parso + Astroid 기반 체커 분리, RTNameErrorParsoChecker 개선)
 import astroid
-import parso # parso import
-from parso.python import tree as pt # parso tree types
+import parso
+from parso.python import tree as pt
 import os
 import sys
 from typing import List, Dict, Any, Set, Optional, Tuple, Union
-import builtins # 내장 함수/타입 확인용
+import builtins
 
 # utils.py에서 필요한 함수들을 import 합니다.
-# 이 함수들은 각 라이브러리(Parso, Astroid)에 맞게 구현되어 있어야 합니다.
 from utils import get_type_astroid, is_compatible_astroid
 
 # --- Base Classes ---
-
-# Astroid 기반 체커용 Base 클래스
 class BaseAstroidChecker:
-    """Astroid 기반 체커의 베이스 클래스."""
-    MSG_ID_PREFIX = 'E' # 기본 오류 코드 Prefix
-    NAME = 'base-astroid-checker' # 체커 이름
-    MSGS: Dict[str, Tuple[str, str, str]] = { # 메시지 정의: {key: (format_string, symbol, description)}
-        'F0001': ('Internal error (astroid): %s', 'fatal-error-astroid', 'Internal error during astroid analysis.'),
-    }
-    # 검사할 astroid 노드 타입 튜플 (astroid 클래스 객체)
+    MSG_ID_PREFIX = 'E'; NAME = 'base-astroid-checker'
+    MSGS: Dict[str, Tuple[str, str, str]] = {'F0001': ('Internal error (astroid): %s', 'fatal-error-astroid', '')}
     node_types: Tuple[type, ...] = ()
-
-    def __init__(self, linter):
-        """Linter 인스턴스를 저장합니다."""
-        self.linter = linter # core.Linter 인스턴스
-
+    def __init__(self, linter): self.linter = linter
     def add_message(self, node: astroid.NodeNG, msg_key: str, args: Optional[Tuple]=None):
-        """Linter에 오류 메시지를 추가합니다 (astroid 노드 기반)."""
-        # 기본 클래스에서는 메시지 추가 안 함
         if self.NAME == 'base-astroid-checker': return
-
         if msg_key in self.MSGS:
-            message_data = self.MSGS[msg_key]
-            message_tmpl = message_data[0] # 포맷 문자열
-            # 인자가 있으면 포맷팅, 없으면 그대로 사용
-            final_message = message_tmpl % args if args else message_tmpl
-            # 메시지 ID 생성 (Prefix + Key)
-            msg_id = f"{self.MSG_ID_PREFIX}{msg_key}"
-            # Linter의 astroid용 메시지 추가 메서드 호출 (core.py에 정의됨)
-            self.linter.add_astroid_message(msg_id, node, final_message)
-        else:
-            # 정의되지 않은 메시지 키 사용 시 경고 출력
-            print(f"Warning: Unknown message key '{msg_key}' in checker {self.NAME}", file=sys.stderr)
+            final_message = (self.MSGS[msg_key][0] % args) if args else self.MSGS[msg_key][0]
+            self.linter.add_astroid_message(f"{self.MSG_ID_PREFIX}{msg_key}", node, final_message)
+        else: print(f"Warning: Unknown msg key '{msg_key}' in {self.NAME}", file=sys.stderr)
+    def check(self, node: astroid.NodeNG): raise NotImplementedError
 
-    def check(self, node: astroid.NodeNG):
-        """구체적인 검사 로직 (하위 클래스에서 구현 필요)."""
-        raise NotImplementedError
-
-# Parso 기반 체커용 Base 클래스
 class BaseParsoChecker:
-    """Parso 기반 체커의 베이스 클래스."""
-    MSG_ID_PREFIX = 'E' # 기본 오류 코드 Prefix
-    NAME = 'base-parso-checker' # 체커 이름
-    MSGS: Dict[str, Tuple[str, str, str]] = { # 메시지 정의
-        'F0002': ('Internal error (parso): %s', 'fatal-error-parso', 'Internal error during parso analysis.'),
-    }
-    # 검사할 parso 노드 타입 문자열 튜플 (e.g., 'name', 'number')
+    MSG_ID_PREFIX = 'E'; NAME = 'base-parso-checker'
+    MSGS: Dict[str, Tuple[str, str, str]] = {'F0002': ('Internal error (parso): %s', 'fatal-error-parso', '')}
     node_types: Tuple[str, ...] = ()
-
-    def __init__(self, linter):
-        """Linter 인스턴스를 저장합니다."""
-        self.linter = linter # core.Linter 인스턴스
-
+    def __init__(self, linter): self.linter = linter
     def add_message(self, node: parso.tree.BaseNode, msg_key: str, args: Optional[Tuple]=None):
-        """Linter에 오류 메시지를 추가합니다 (parso 노드 기반)."""
-        # 기본 클래스에서는 메시지 추가 안 함
         if self.NAME == 'base-parso-checker': return
-
         if msg_key in self.MSGS:
-            message_data = self.MSGS[msg_key]
-            message_tmpl = message_data[0]
-            final_message = message_tmpl % args if args else message_tmpl
-            msg_id = f"{self.MSG_ID_PREFIX}{msg_key}"
-             # Linter의 parso용 메시지 추가 메서드 호출 (core.py의 기본 add_message)
-            self.linter.add_message(msg_id, node, final_message)
-        else:
-             print(f"Warning: Unknown message key '{msg_key}' in checker {self.NAME}", file=sys.stderr)
-
-    def check(self, node: parso.tree.BaseNode):
-        """구체적인 검사 로직 (하위 클래스에서 구현 필요)."""
-        raise NotImplementedError
-
+            final_message = (self.MSGS[msg_key][0] % args) if args else self.MSGS[msg_key][0]
+            self.linter.add_message(f"{self.MSG_ID_PREFIX}{msg_key}", node, final_message)
+        else: print(f"Warning: Unknown msg key '{msg_key}' in {self.NAME}", file=sys.stderr)
+    def check(self, node: parso.tree.BaseNode): raise NotImplementedError
 
 # --- 실시간 체커 (Parso 기반) ---
 class RTNameErrorParsoChecker(BaseParsoChecker):
@@ -91,17 +43,14 @@ class RTNameErrorParsoChecker(BaseParsoChecker):
     MSGS = {'0101': ("Potential NameError: Name '%s' might not be defined (RT-Parso)", 'undefined-variable-rt-parso', '')}
 
     def _is_attribute_name(self, node: parso.tree.Leaf) -> bool:
-        """이름 노드가 객체의 속성으로 사용되었는지 확인합니다 (예: obj.THIS_NAME)."""
         parent = node.parent
         if parent and parent.type == 'trailer':
-            if len(parent.children) == 2 and \
-               parent.children[0].type == 'operator' and parent.children[0].value == '.' and \
-               parent.children[1] is node:
+            if len(parent.children) == 2 and parent.children[0].type == 'operator' and \
+               parent.children[0].value == '.' and parent.children[1] is node:
                 return True
         return False
 
     def _is_keyword_arg_name(self, node: parso.tree.Leaf) -> bool:
-        """이름 노드가 함수 호출 시 키워드 인자 이름으로 사용되었는지 확인합니다 (예: func(THIS_NAME=value))."""
         parent = node.parent
         if parent and parent.type == 'argument':
             if len(parent.children) > 1 and parent.children[0] is node and \
@@ -110,43 +59,62 @@ class RTNameErrorParsoChecker(BaseParsoChecker):
         return False
 
     def _is_definition_context(self, node: parso.tree.Leaf) -> bool:
-        """이름 노드가 정의의 일부인지 (할당의 왼쪽, 함수/클래스/파라미터 이름 등) 간단히 확인합니다."""
-        parent = node.parent
-        if not parent: return False
-        parent_type = parent.type
-
-        # 함수/클래스 정의 이름
-        if parent_type in ('funcdef', 'classdef') and len(parent.children) > 1 and parent.children[1] is node:
-            return True
-        # 함수 파라미터 이름
-        if parent_type == 'param' and len(parent.children)>0 and parent.children[0] is node:
-            return True
-        # 할당문의 가장 왼쪽 (간단한 경우)
-        grandparent = parent.parent
-        if grandparent and grandparent.type == 'expr_stmt' and parent is grandparent.children[0] and parent_type == 'name':
-             if len(grandparent.children) > 1 and grandparent.children[1].type == 'operator' and grandparent.children[1].value == '=':
-                  return True
-        # Import 이름 (더 정확한 건 get_defined_names지만, 이건 사용 컨텍스트인지 판단용)
-        if grandparent and grandparent.type in ('import_name', 'import_from'): return True
-        if parent_type in ('dotted_as_name', 'import_as_name'): return True
-        # With item target (with ... as target)
-        if parent_type == 'with_item' and len(parent.children) == 3 and isinstance(parent.children[1], parso.tree.Leaf) and parent.children[1].value == 'as' and parent.children[2] is node:
-            return True
-        # except clause target (except E as target)
-        if parent_type == 'except_clause' and len(parent.children) >= 4 and isinstance(parent.children[2], parso.tree.Leaf) and parent.children[2].value == 'as' and parent.children[3] is node:
-            return True
-        # For loop target (간단한 for x in ...)
-        if parent_type == 'for_stmt' and len(parent.children) > 1 and parent.children[1] is node:
-            return True
+        current = node; parent = current.parent
+        while parent:
+            parent_type = parent.type
+            if parent_type == 'expr_stmt':
+                target_part = parent.children[0]
+                is_lhs_of_assign = False
+                # Check if 'current' is part of the direct LHS of an assignment
+                temp_node_for_lhs_check = current
+                while temp_node_for_lhs_check:
+                    if temp_node_for_lhs_check is target_part: is_lhs_of_assign = True; break
+                    if temp_node_for_lhs_check.parent is parent: break
+                    temp_node_for_lhs_check = temp_node_for_lhs_check.parent
+                if is_lhs_of_assign:
+                    if len(parent.children) > 1 and parent.children[1].type == 'operator' and parent.children[1].value in ['=', ':=']: return True
+                    if len(parent.children) > 1 and parent.children[1].type == 'operator' and parent.children[1].value == ':': return True
+            if parent_type in ('funcdef', 'classdef') and len(parent.children) > 1 and parent.children[1] is current: return True
+            if parent_type == 'param' and hasattr(parent, 'name') and parent.name is current: return True
+            grandparent = parent.parent
+            if grandparent and grandparent.type in ('import_name', 'import_from'):
+                try:
+                    if grandparent.parent and hasattr(grandparent.parent, 'get_defined_names'):
+                         for defined_name_leaf in grandparent.parent.get_defined_names():
+                              if defined_name_leaf == current: return True
+                except: pass
+            if parent_type in ('dotted_as_name', 'import_as_name'):
+                 if len(parent.children) == 3 and parent.children[2] is current: return True
+                 if len(parent.children) == 1 and parent.children[0] is current: return True
+            if parent_type == 'with_item' and len(parent.children) == 3 and isinstance(parent.children[1], parso.tree.Leaf) and parent.children[1].value == 'as':
+                # Check if current is part of the target(s) in parent.children[2]
+                temp_node_for_with_target = current
+                while temp_node_for_with_target:
+                    if temp_node_for_with_target is parent.children[2]: return True
+                    if temp_node_for_with_target.parent is parent: break
+                    temp_node_for_with_target = temp_node_for_with_target.parent
+            if parent_type == 'except_clause' and len(parent.children) >= 3:
+                as_found = False
+                for child_except in parent.children:
+                    if isinstance(child_except, parso.tree.Leaf) and child_except.value == 'as': as_found = True; continue
+                    if as_found and child_except is current: return True
+            if parent_type == 'for_stmt' and len(parent.children) > 1:
+                 # Check if current is part of the target(s) in parent.children[1]
+                temp_node_for_for_target = current
+                while temp_node_for_for_target:
+                    if temp_node_for_for_target is parent.children[1]: return True
+                    if temp_node_for_for_target.parent is parent: break
+                    temp_node_for_for_target = temp_node_for_for_target.parent
+            if parent_type in ('file_input', 'funcdef', 'classdef', 'lambdef'): break
+            current = parent; parent = current.parent
         return False
 
     def check(self, node: parso.tree.Leaf):
         node_value = node.value
-
         if hasattr(builtins, node_value): return
         if self._is_attribute_name(node): return
         if self._is_keyword_arg_name(node): return
-        if self._is_definition_context(node): return # 정의 컨텍스트면 사용이 아님
+        if self._is_definition_context(node): return
 
         try:
             if not self.linter.grammar: return
@@ -154,9 +122,8 @@ class RTNameErrorParsoChecker(BaseParsoChecker):
             if not definitions:
                 current_scope_vars = self.linter.get_current_scope_variables_parso()
                 if node_value not in current_scope_vars:
-                     self.add_message(node, '0101', (node_value,))
+                    self.add_message(node, '0101', (node_value,))
         except Exception as e:
-            # print(f"Error inferring parso node '{node_value}' L{node.start_pos[0]}:{node.start_pos[1]}: {e}", file=sys.stderr)
             current_scope_vars = self.linter.get_current_scope_variables_parso()
             if node_value not in current_scope_vars:
                  self.add_message(node, '0101', (node_value,))
@@ -164,35 +131,27 @@ class RTNameErrorParsoChecker(BaseParsoChecker):
 class RTZeroDivisionParsoChecker(BaseParsoChecker):
     MSG_ID_PREFIX = 'E'; NAME = 'rt-zero-division-parso'; node_types = ('term', 'arith_expr', 'power')
     MSGS = {'0201': ("Potential ZeroDivisionError: Division by zero (RT-Parso)", 'division-by-zero-rt-parso', '')}
-
     def _get_actual_value_node(self, node: parso.tree.BaseNode) -> parso.tree.BaseNode:
-        current = node
-        while hasattr(current, 'children') and len(current.children) == 1 and current.type != 'number':
-            current = current.children[0]
+        current = node; 
+        while hasattr(current, 'children') and len(current.children) == 1 and current.type != 'number': current = current.children[0]
         return current
-
     def check(self, node: parso.tree.Node):
         try:
             if hasattr(node, 'children') and len(node.children) >= 3:
-                 op_index = -1
+                 op_idx = -1;
                  for i, child in enumerate(node.children):
-                      if child.type == 'operator' and child.value in ('/', '//'):
-                           op_index = i; break
-                 if op_index > 0 and op_index + 1 < len(node.children):
-                      right_operand_container = node.children[op_index + 1]
-                      actual_right_node = self._get_actual_value_node(right_operand_container)
-                      if actual_right_node.type == 'number':
-                           val_str = actual_right_node.value.lower()
-                           is_zero = False
+                      if child.type == 'operator' and child.value in ('/', '//'): op_idx = i; break
+                 if op_idx > 0 and op_idx + 1 < len(node.children):
+                      r_op_container = node.children[op_idx + 1]; actual_r_node = self._get_actual_value_node(r_op_container)
+                      if actual_r_node.type == 'number':
+                           val_str = actual_r_node.value.lower(); is_zero = False
                            if val_str == '0': is_zero = True
                            else:
                                 try:
                                      if float(val_str) == 0.0: is_zero = True
                                 except ValueError: pass
-                           if is_zero:
-                                self.add_message(actual_right_node, '0201')
-        except Exception as e:
-             node_repr = repr(node); print(f"Error in RTZeroDivisionParsoChecker for {node_repr[:100]}...: {e}", file=sys.stderr)
+                           if is_zero: self.add_message(actual_r_node, '0201')
+        except Exception as e: node_repr = repr(node); print(f"Error in RTZeroDivision for {node_repr[:100]}...: {e}", file=sys.stderr)
 
 # --- 상세 분석용 체커 (Astroid 기반 - 전체 코드) ---
 class StaticNameErrorChecker(BaseAstroidChecker):
@@ -209,7 +168,6 @@ class StaticTypeErrorChecker(BaseAstroidChecker):
     MSGS = {'0301': ("TypeError: Incompatible types for '%s' operation: %s and %s (Static)", 'invalid-types-op', '')}
     def check(self, node: astroid.BinOp):
         try:
-            # from utils import get_type_astroid, is_compatible_astroid # core.py에서 import하므로 여기서 또 할 필요 없음
             left_type = get_type_astroid(node.left)
             right_type = get_type_astroid(node.right)
             if left_type and right_type and not is_compatible_astroid(left_type, right_type, node.op):
@@ -315,12 +273,12 @@ class StaticInfiniteLoopChecker(BaseAstroidChecker):
 class StaticRecursionChecker(BaseAstroidChecker):
     MSG_ID_PREFIX = 'W'; NAME = 'static-recursion'
     MSGS = {'0801': ("Potential recursion: Function '%s' calls itself (Static)", 'recursive-call','')}
-    def check_function_recursion(self, func_node: astroid.FunctionDef): # 이 메서드는 Linter에서 직접 호출
+    def check_function_recursion(self, func_node: astroid.FunctionDef):
          func_name = func_node.name
          try:
              for call_node in func_node.nodes_of_class(astroid.Call):
                  if isinstance(call_node.func, astroid.Name) and call_node.func.name == func_name:
-                     if call_node.scope() is func_node: # 호출이 해당 함수 스코프 내에서 일어나는지 확인
+                     if call_node.scope() is func_node:
                           self.add_message(call_node.func, '0801', (func_name,)); return
          except Exception as e: print(f"Error checking recursion for {func_name}: {e}", file=sys.stderr)
 
@@ -332,10 +290,8 @@ class StaticFileNotFoundChecker(BaseAstroidChecker):
               if isinstance(node.func, astroid.Name) and node.func.name == 'open':
                   if node.args and isinstance(node.args[0], astroid.Const) and isinstance(node.args[0].value, str):
                       file_path_value = node.args[0].value
-                      if file_path_value and not os.path.isabs(file_path_value): # 상대 경로인 경우만 체크 (또는 다른 전략)
-                          # 절대 경로는 환경 의존성이 너무 큼
-                          # 실제로는 프로젝트 루트 기준 상대 경로 해석 등 필요
-                          if not os.path.exists(file_path_value): # 이 부분은 실행 환경에 따라 오탐 가능
+                      if file_path_value and not os.path.isabs(file_path_value):
+                          if not os.path.exists(file_path_value):
                               self.add_message(node.args[0], '0901', (file_path_value,))
           except OSError as e: print(f"OSError checking file for {node.args[0].value if node.args and isinstance(node.args[0], astroid.Const) else 'N/A'}: {e}", file=sys.stderr)
           except Exception as e: print(f"Error in StaticFileNotFoundChecker for {repr(node)[:100]}...: {e}", file=sys.stderr)
@@ -345,6 +301,6 @@ RT_CHECKERS_CLASSES = [ RTNameErrorParsoChecker, RTZeroDivisionParsoChecker ]
 STATIC_CHECKERS_CLASSES = [
      StaticNameErrorChecker, StaticTypeErrorChecker, StaticAttributeErrorChecker,
      StaticIndexErrorChecker, StaticKeyErrorChecker, StaticInfiniteLoopChecker,
-     # StaticRecursionChecker 는 Linter.analyze_astroid 에서 별도 호출
+     # StaticRecursionChecker 는 Linter.analyze_astroid 에서 별도 호출되므로 목록에 넣지 않음
      StaticFileNotFoundChecker
 ]
