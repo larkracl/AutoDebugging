@@ -5,3 +5,4 @@ secret.properties
 testFixture/
 __pycache__/
 *.pyc
+*.pyc
