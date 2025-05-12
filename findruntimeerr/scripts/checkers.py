@@ -7,7 +7,6 @@ import sys
 from typing import List, Dict, Any, Set, Optional, Tuple, Union
 import builtins
 
-# utils.py에서 필요한 함수들을 import 합니다.
 from utils import get_type_astroid, is_compatible_astroid
 
 # --- Base Classes ---
@@ -58,54 +57,49 @@ class RTNameErrorParsoChecker(BaseParsoChecker):
                 return True
         return False
 
-    def _is_definition_context(self, node: parso.tree.Leaf) -> bool:
-        current = node; parent = current.parent
+    def _is_part_of_definition(self, node: parso.tree.Leaf) -> bool:
+        """이름이 정의되는 위치에 사용되었는지 확인합니다 (LHS, def/class 이름, param 등)."""
+        current = node
+        parent = current.parent
         while parent:
             parent_type = parent.type
+            # 1. 함수/클래스 정의 이름 ('def NAME()', 'class NAME:')
+            if parent_type in ('funcdef', 'classdef') and len(parent.children) > 1 and parent.children[1] is current:
+                return True
+            # 2. 함수 파라미터 이름
+            if parent_type == 'param' and hasattr(parent, 'name') and parent.name is current:
+                return True
+            # 3. 할당문의 LHS (target = value, target : type = value, target := value)
             if parent_type == 'expr_stmt':
-                target_part = parent.children[0]
-                is_lhs_of_assign = False
-                # Check if 'current' is part of the direct LHS of an assignment
-                temp_node_for_lhs_check = current
-                while temp_node_for_lhs_check:
-                    if temp_node_for_lhs_check is target_part: is_lhs_of_assign = True; break
-                    if temp_node_for_lhs_check.parent is parent: break
-                    temp_node_for_lhs_check = temp_node_for_lhs_check.parent
-                if is_lhs_of_assign:
-                    if len(parent.children) > 1 and parent.children[1].type == 'operator' and parent.children[1].value in ['=', ':=']: return True
-                    if len(parent.children) > 1 and parent.children[1].type == 'operator' and parent.children[1].value == ':': return True
-            if parent_type in ('funcdef', 'classdef') and len(parent.children) > 1 and parent.children[1] is current: return True
-            if parent_type == 'param' and hasattr(parent, 'name') and parent.name is current: return True
-            grandparent = parent.parent
-            if grandparent and grandparent.type in ('import_name', 'import_from'):
-                try:
-                    if grandparent.parent and hasattr(grandparent.parent, 'get_defined_names'):
-                         for defined_name_leaf in grandparent.parent.get_defined_names():
-                              if defined_name_leaf == current: return True
-                except: pass
-            if parent_type in ('dotted_as_name', 'import_as_name'):
-                 if len(parent.children) == 3 and parent.children[2] is current: return True
-                 if len(parent.children) == 1 and parent.children[0] is current: return True
-            if parent_type == 'with_item' and len(parent.children) == 3 and isinstance(parent.children[1], parso.tree.Leaf) and parent.children[1].value == 'as':
-                # Check if current is part of the target(s) in parent.children[2]
-                temp_node_for_with_target = current
-                while temp_node_for_with_target:
-                    if temp_node_for_with_target is parent.children[2]: return True
-                    if temp_node_for_with_target.parent is parent: break
-                    temp_node_for_with_target = temp_node_for_with_target.parent
-            if parent_type == 'except_clause' and len(parent.children) >= 3:
-                as_found = False
-                for child_except in parent.children:
-                    if isinstance(child_except, parso.tree.Leaf) and child_except.value == 'as': as_found = True; continue
-                    if as_found and child_except is current: return True
+                lhs_candidate = parent.children[0]
+                is_on_lhs = False
+                temp_node = current
+                while temp_node:
+                    if temp_node is lhs_candidate: is_on_lhs = True; break
+                    if temp_node.parent is parent: break
+                    if temp_node.parent is None: break
+                    temp_node = temp_node.parent
+                if is_on_lhs:
+                    if len(parent.children) > 1 and parent.children[1].type == 'operator':
+                        if parent.children[1].value == '=': return True
+                        if parent.children[1].value == ':': return True # For "name: type" or "name: type = value"
+            # Walrus operator: namedexpr_test -> NAME ':=' test
+            if parent_type == 'namedexpr_test' and len(parent.children) > 0 and parent.children[0] is current:
+                return True
+            # For 루프 변수: for_stmt -> 'for' testlist_star_expr 'in' ... (testlist_star_expr is parent.children[1])
             if parent_type == 'for_stmt' and len(parent.children) > 1:
-                 # Check if current is part of the target(s) in parent.children[1]
-                temp_node_for_for_target = current
-                while temp_node_for_for_target:
-                    if temp_node_for_for_target is parent.children[1]: return True
-                    if temp_node_for_for_target.parent is parent: break
-                    temp_node_for_for_target = temp_node_for_for_target.parent
-            if parent_type in ('file_input', 'funcdef', 'classdef', 'lambdef'): break
+                target_list_node = parent.children[1]
+                # Check if 'current' is within target_list_node
+                temp_node = current
+                while temp_node:
+                    if temp_node is target_list_node: return True
+                    if temp_node.parent is parent: break # Reached direct child of for_stmt
+                    if temp_node.parent is None: break
+                    temp_node = temp_node.parent
+            # With ... as 변수, Except ... as 변수 (collect_defined_variables_parso 에서 수집)
+            # These are better identified by checking if they are in `current_scope_vars`.
+            # This function is for quick syntactic checks of definition sites.
+            if parent_type in ('file_input', 'suite', 'funcdef', 'classdef', 'lambdef'): break # 스코프 경계
             current = parent; parent = current.parent
         return False
 
@@ -114,7 +108,7 @@ class RTNameErrorParsoChecker(BaseParsoChecker):
         if hasattr(builtins, node_value): return
         if self._is_attribute_name(node): return
         if self._is_keyword_arg_name(node): return
-        if self._is_definition_context(node): return
+        if self._is_part_of_definition(node): return
 
         try:
             if not self.linter.grammar: return
@@ -124,6 +118,7 @@ class RTNameErrorParsoChecker(BaseParsoChecker):
                 if node_value not in current_scope_vars:
                     self.add_message(node, '0101', (node_value,))
         except Exception as e:
+            # print(f"Infer error for '{node_value}': {e}", file=sys.stderr)
             current_scope_vars = self.linter.get_current_scope_variables_parso()
             if node_value not in current_scope_vars:
                  self.add_message(node, '0101', (node_value,))
@@ -145,7 +140,7 @@ class RTZeroDivisionParsoChecker(BaseParsoChecker):
                       r_op_container = node.children[op_idx + 1]; actual_r_node = self._get_actual_value_node(r_op_container)
                       if actual_r_node.type == 'number':
                            val_str = actual_r_node.value.lower(); is_zero = False
-                           if val_str == '0': is_zero = True
+                           if val_str == '0' or val_str == '0.0' or val_str.startswith('0e'): is_zero = True
                            else:
                                 try:
                                      if float(val_str) == 0.0: is_zero = True

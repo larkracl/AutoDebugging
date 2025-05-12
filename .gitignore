@@ -4,5 +4,6 @@ findruntimeerr/.venv/
 secret.properties
 testFixture/
 __pycache__/
-*.pyc
-*.pyc
+findruntimeerr/out/*.js.map
+findruntimeerr/out/*.js
+findruntimeerr/scripts/__pycache__/*.*.pyc

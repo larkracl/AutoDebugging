@@ -55,9 +55,15 @@ def collect_defined_variables_parso(scope_node: ParsoScopeNode) -> Set[str]:
                       elif node_in_class.type == 'simple_stmt' and len(node_in_class.children) > 0 and \
                            node_in_class.children[0].type == 'expr_stmt':
                            assign_expr = node_in_class.children[0]
+                           # 클래스 변수 일반 할당
                            if len(assign_expr.children) >= 3 and assign_expr.children[1].type == 'operator' and \
                               assign_expr.children[1].value == '=':
                                 _add_parso_target_names(assign_expr.children[0], defined_vars)
+                           # 클래스 변수 주석 할당 (a: int = 1 or a: int)
+                           elif len(assign_expr.children) >= 2 and assign_expr.children[1].type == 'operator' and \
+                                assign_expr.children[1].value == ':':
+                                _add_parso_target_names(assign_expr.children[0], defined_vars)
+
 
         # 3. 현재 스코프의 직계 자식 노드들 순회하며 정의 찾기
         nodes_to_check = []
@@ -65,35 +71,51 @@ def collect_defined_variables_parso(scope_node: ParsoScopeNode) -> Set[str]:
         elif hasattr(scope_node, 'get_suite'): # Function, Class의 suite
              suite = scope_node.get_suite()
              if suite: nodes_to_check = suite.children
-        elif isinstance(scope_node, pt.Lambda):
-             if len(scope_node.children) > 1: nodes_to_check = [scope_node.children[-1]]
+        elif isinstance(scope_node, pt.Lambda): # Lambda의 body는 expression
+             if len(scope_node.children) > 1: # ':' 이후의 expression node
+                  # Lambda body에서 walrus 연산자로 정의된 이름 찾기
+                  lambda_body = scope_node.children[-1]
+                  if hasattr(lambda_body, 'iter_preorder'): # 모든 하위 노드 순회
+                       for sub_node in lambda_body.iter_preorder():
+                            if sub_node.type == 'namedexpr_test': # Walrus: NAME ':=' test
+                                 if len(sub_node.children) > 0 and sub_node.children[0].type == 'name':
+                                      if isinstance(sub_node.children[0], parso.tree.Leaf):
+                                           defined_vars.add(sub_node.children[0].value)
+
 
         for node in nodes_to_check:
             node_type = node.type
-            # 할당문 (a = 1, a,b = 1,2), AnnAssign (a: int = 1)
+            # 할당문 (a = 1, a,b = 1,2), AnnAssign (a: int = 1 or a: int)
             if node_type == 'simple_stmt' and len(node.children) > 0:
                 first_child_stmt = node.children[0]
                 if first_child_stmt.type == 'expr_stmt':
                     if len(first_child_stmt.children) >= 2:
-                        op_node_idx = -1
+                        # 일반 할당: target = value
                         if len(first_child_stmt.children) >= 3 and first_child_stmt.children[1].type == 'operator' and \
                            first_child_stmt.children[1].value == '=':
-                            op_node_idx = 1
+                            _add_parso_target_names(first_child_stmt.children[0], defined_vars)
+                        # 주석 할당: target ':' type ['=' value]
                         elif first_child_stmt.children[1].type == 'operator' and first_child_stmt.children[1].value == ':':
-                            if len(first_child_stmt.children) >= 5 and \
-                               first_child_stmt.children[3].type == 'operator' and first_child_stmt.children[3].value == '=':
-                                op_node_idx = 3
-                            else:
-                                _add_parso_target_names(first_child_stmt.children[0], defined_vars)
-                        if op_node_idx != -1 :
                              _add_parso_target_names(first_child_stmt.children[0], defined_vars)
-            elif node_type == 'namedexpr_test': # Walrus operator
-                 if len(node.children) >= 3 and node.children[1].type == 'operator' and node.children[1].value == ':=':
-                      _add_parso_target_names(node.children[0], defined_vars)
+
+            # Walrus operator (name := expr) - expr_stmt 외의 컨텍스트에서도 나타날 수 있음
+            # (if, while, list comprehension 등)
+            # iter_preorder()를 사용하여 모든 하위 노드에서 namedexpr_test 찾기
+            if hasattr(node, 'iter_preorder'):
+                for sub_node in node.iter_preorder():
+                    if sub_node.type == 'namedexpr_test': # NAME ':=' test
+                         if len(sub_node.children) > 0 and sub_node.children[0].type == 'name':
+                              if isinstance(sub_node.children[0], parso.tree.Leaf):
+                                   defined_vars.add(sub_node.children[0].value)
+
+
+            # 함수/클래스 정의 이름
             elif node_type in ('funcdef', 'classdef'):
                 name_node = node.children[1]
                 if name_node.type == 'name' and isinstance(name_node, parso.tree.Leaf):
                     defined_vars.add(name_node.value)
+
+            # Import 문
             elif node_type == 'simple_stmt' and len(node.children) > 0:
                  import_stmt = node.children[0]
                  if import_stmt.type in ('import_name', 'import_from'):
@@ -101,9 +123,13 @@ def collect_defined_variables_parso(scope_node: ParsoScopeNode) -> Set[str]:
                           for name_leaf in import_stmt.get_defined_names():
                                if name_leaf.value != '*': defined_vars.add(name_leaf.value)
                       except Exception as e: print(f"Error parsing import names: {e}", file=sys.stderr)
+
+            # For 루프 변수
             elif node_type == 'for_stmt':
-                 if len(node.children) >= 2:
+                 if len(node.children) >= 2: # 'for' target_list 'in' ...
                      _add_parso_target_names(node.children[1], defined_vars)
+
+            # With ... as 변수
             elif node_type == 'with_stmt':
                  for item_child in node.children:
                       if item_child.type == 'with_item':
@@ -112,6 +138,7 @@ def collect_defined_variables_parso(scope_node: ParsoScopeNode) -> Set[str]:
                                     if sub_idx + 1 < len(item_child.children):
                                          _add_parso_target_names(item_child.children[sub_idx+1], defined_vars)
                                     break
+            # Except ... as 변수
             elif node_type == 'try_stmt':
                  for child_of_try in node.children:
                       if child_of_try.type == 'except_clause':
@@ -128,10 +155,10 @@ def collect_defined_variables_parso(scope_node: ParsoScopeNode) -> Set[str]:
          scope_repr = repr(scope_node); print(f"Error in collect_defined_variables_parso for {scope_repr[:100]}...: {e}", file=sys.stderr); traceback.print_exc(file=sys.stderr)
     return defined_vars
 
-# --- Astroid 기반 함수 ---
+# --- Astroid 기반 함수 (이전 답변과 동일) ---
 def get_type_astroid(node: astroid.NodeNG) -> Optional[str]:
     try:
-        inferred_list = list(node.infer(context=None))
+        inferred_list = list(node.infer(context=None));
         if not inferred_list or inferred_list[0] is astroid.Uninferable:
             if isinstance(node, astroid.Const): return type(node.value).__name__
             elif isinstance(node, astroid.List): return 'list'
@@ -154,8 +181,7 @@ def get_type_astroid(node: astroid.NodeNG) -> Optional[str]:
              return type(primary_type.value).__name__
         return getattr(primary_type, 'qname', getattr(primary_type, 'name', type(primary_type).__name__))
     except astroid.InferenceError: return None
-    except Exception as e:
-        node_repr = repr(node); print(f"Error in get_type_astroid for {node_repr[:100]}...: {e}", file=sys.stderr); traceback.print_exc(file=sys.stderr); return None
+    except Exception as e: node_repr = repr(node); print(f"Error in get_type_astroid for {node_repr[:100]}...: {e}", file=sys.stderr); traceback.print_exc(file=sys.stderr); return None
 
 def is_compatible_astroid(type1_fq: Optional[str], type2_fq: Optional[str], op: str) -> bool:
     if type1_fq is None or type2_fq is None: return True
