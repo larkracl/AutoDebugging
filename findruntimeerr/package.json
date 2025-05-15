@@ -29,7 +29,7 @@
       "properties": {
         "findRuntimeErr.enable": {
           "type": "boolean",
-          "default": 50,
+          "default": true,
           "description": "Minimum code length (number of characters) required to trigger real-time analysis."
         },
         "findRuntimeErr.severityLevel": {
