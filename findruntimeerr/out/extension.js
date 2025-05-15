@@ -7,6 +7,7 @@ const vscode = require("vscode");
 const child_process_1 = require("child_process");
 const path = require("path");
 const fs = require("fs");
+let dynamicProcess = null;
 let outputChannel;
 let diagnosticCollection;
 let errorDecorationType;
@@ -447,19 +448,27 @@ function activate(context) {
             return new Promise((resolve) => {
                 const spawnOpts = { cwd: scriptDir };
                 outputChannel.appendLine(`[runDynamicAnalysisProcess] Spawning: "${pythonExecutable}" "${scriptPath}"`);
-                const proc = (0, child_process_1.spawn)(pythonExecutable, [scriptPath], spawnOpts);
+                dynamicProcess = (0, child_process_1.spawn)(pythonExecutable, [scriptPath], spawnOpts);
+                const proc = dynamicProcess;
                 let stdoutData = "";
                 let stderrData = "";
-                proc.stdin.write(code);
-                proc.stdin.end();
-                proc.stdout.on("data", (data) => {
+                proc.stdin?.write(code);
+                proc.stdin?.end();
+                proc.stdout?.on("data", (data) => {
                     stdoutData += data;
                 });
-                proc.stderr.on("data", (data) => {
+                proc.stderr?.on("data", (data) => {
                     stderrData += data;
                     outputChannel.appendLine(`[runDynamicAnalysisProcess] STDERR: ${data}`);
                 });
-                proc.on("close", (code) => {
+                proc.on("close", (code, signal) => {
+                    // If process was killed (code === null), treat as user abort and return no errors
+                    if (code === null) {
+                        outputChannel.appendLine(`[runDynamicAnalysisProcess] Process killed by user (signal: ${signal}). Aborting dynamic analysis.`);
+                        resolve({ errors: [], call_graph: null });
+                        dynamicProcess = null;
+                        return;
+                    }
                     outputChannel.appendLine(`[runDynamicAnalysisProcess] Process exited with code ${code}`);
                     outputChannel.appendLine(`[runDynamicAnalysisProcess] RAW STDOUT: ${stdoutData}`);
                     if (code !== 0) {
@@ -493,6 +502,7 @@ function activate(context) {
                             call_graph: null,
                         });
                     }
+                    dynamicProcess = null;
                 });
                 proc.on("error", (err) => {
                     resolve({
@@ -506,6 +516,7 @@ function activate(context) {
                         ],
                         call_graph: null,
                     });
+                    dynamicProcess = null;
                 });
             });
         }
@@ -718,6 +729,18 @@ function activate(context) {
             }
             else {
                 vscode.window.showWarningMessage("FindRuntimeErr: Please open a Python file to run dynamic analysis.");
+            }
+        }));
+        // Command to kill the running dynamic analysis Python process
+        context.subscriptions.push(vscode.commands.registerCommand("findRuntimeErr.killPythonProcess", () => {
+            if (dynamicProcess) {
+                dynamicProcess.kill();
+                outputChannel.appendLine("[Command] Python process killed by user.");
+                vscode.window.showInformationMessage("FindRuntimeErr: Python process has been terminated.");
+                dynamicProcess = null;
+            }
+            else {
+                vscode.window.showWarningMessage("FindRuntimeErr: No Python process is currently running.");
             }
         }));
         // --- 초기 실행 (async 함수 사용 및 getSelectedPythonPath 호출) ---

@@ -1,9 +1,11 @@
 // src/extension.ts
 import * as vscode from "vscode";
-import { spawn, SpawnOptionsWithoutStdio, execSync } from "child_process";
+import { spawn, SpawnOptionsWithoutStdio, execSync, ChildProcess } from "child_process";
 import * as path from "path";
 import * as fs from "fs";
 import * as os from "os";
+
+let dynamicProcess: ChildProcess | null = null;
 
 // --- 인터페이스 정의 ---
 interface ExtensionConfig {
@@ -148,7 +150,7 @@ export function activate(context: vscode.ExtensionContext) {
               pythonExtension.exports &&
               pythonExtension.exports.settings &&
               typeof pythonExtension.exports.settings.getExecutionDetails ===
-                "function"
+              "function"
             ) {
               const effectiveResourceUri =
                 resource ||
@@ -422,7 +424,7 @@ export function activate(context: vscode.ExtensionContext) {
                       errorLine = errorResult.errors[0].line || errorLine;
                       errorColumn = errorResult.errors[0].column || errorColumn;
                     }
-                  } catch {}
+                  } catch { }
                 }
                 if (
                   stderrData.trim() &&
@@ -471,9 +473,8 @@ export function activate(context: vscode.ExtensionContext) {
               resolve({
                 errors: [
                   {
-                    message: `Error parsing analysis results: ${
-                      parseError.message
-                    }. Raw: ${stdoutData.substring(0, 100)}...`,
+                    message: `Error parsing analysis results: ${parseError.message
+                      }. Raw: ${stdoutData.substring(0, 100)}...`,
                     line: 1,
                     column: 0,
                     errorType: "JSONParseError",
@@ -595,19 +596,27 @@ export function activate(context: vscode.ExtensionContext) {
         outputChannel.appendLine(
           `[runDynamicAnalysisProcess] Spawning: "${pythonExecutable}" "${scriptPath}"`
         );
-        const proc = spawn(pythonExecutable, [scriptPath], spawnOpts);
+        dynamicProcess = spawn(pythonExecutable, [scriptPath], spawnOpts);
+        const proc = dynamicProcess;
         let stdoutData = "";
         let stderrData = "";
-        proc.stdin.write(code);
-        proc.stdin.end();
-        proc.stdout.on("data", (data) => {
+        proc.stdin?.write(code);
+        proc.stdin?.end();
+        proc.stdout?.on("data", (data) => {
           stdoutData += data;
         });
-        proc.stderr.on("data", (data) => {
+        proc.stderr?.on("data", (data) => {
           stderrData += data;
           outputChannel.appendLine(`[runDynamicAnalysisProcess] STDERR: ${data}`);
         });
-        proc.on("close", (code) => {
+        proc.on("close", (code, signal) => {
+          // If process was killed (code === null), treat as user abort and return no errors
+          if (code === null) {
+            outputChannel.appendLine(`[runDynamicAnalysisProcess] Process killed by user (signal: ${signal}). Aborting dynamic analysis.`);
+            resolve({ errors: [], call_graph: null });
+            dynamicProcess = null;
+            return;
+          }
           outputChannel.appendLine(
             `[runDynamicAnalysisProcess] Process exited with code ${code}`
           );
@@ -644,6 +653,7 @@ export function activate(context: vscode.ExtensionContext) {
               call_graph: null,
             });
           }
+          dynamicProcess = null;
         });
         proc.on("error", (err) => {
           resolve({
@@ -657,6 +667,7 @@ export function activate(context: vscode.ExtensionContext) {
             ],
             call_graph: null,
           });
+          dynamicProcess = null;
         });
       });
     }
@@ -942,43 +953,63 @@ export function activate(context: vscode.ExtensionContext) {
         "findRuntimeErr.runDynamicAnalysis",
 
         () => {
-const editor = vscode.window.activeTextEditor;
-      if (editor && editor.document.languageId === "python") {
-        outputChannel.appendLine("[Command] findRuntimeErr.runDynamicAnalysis executed.");
-        const config = getConfiguration();
-        clearPreviousAnalysis(editor.document.uri);
+          const editor = vscode.window.activeTextEditor;
+          if (editor && editor.document.languageId === "python") {
+            outputChannel.appendLine("[Command] findRuntimeErr.runDynamicAnalysis executed.");
+            const config = getConfiguration();
+            clearPreviousAnalysis(editor.document.uri);
 
-        runDynamicAnalysisProcess(editor.document.getText(), editor.document.uri)
-          .then((result) => {
-            handleAnalysisResult(editor.document.uri, config, result, "dynamic");
-            // Function-level error summary
-            const summaryCounts: { [fn: string]: number } = {};
-            result.errors.forEach(err => {
-              const match = err.message.match(/Function `(.+?)` failed/);
-              const fn = match ? match[1] : 'unknown';
-              summaryCounts[fn] = (summaryCounts[fn] || 0) + 1;
-            });
-            outputChannel.appendLine('[Dynamic Analysis Summary]');
-            for (const [fn, cnt] of Object.entries(summaryCounts)) {
-              outputChannel.appendLine(`  ${fn}: ${cnt} error(s)`);
-            }
+            runDynamicAnalysisProcess(editor.document.getText(), editor.document.uri)
+              .then((result) => {
+                handleAnalysisResult(editor.document.uri, config, result, "dynamic");
+                // Function-level error summary
+                const summaryCounts: { [fn: string]: number } = {};
+                result.errors.forEach(err => {
+                  const match = err.message.match(/Function `(.+?)` failed/);
+                  const fn = match ? match[1] : 'unknown';
+                  summaryCounts[fn] = (summaryCounts[fn] || 0) + 1;
+                });
+                outputChannel.appendLine('[Dynamic Analysis Summary]');
+                for (const [fn, cnt] of Object.entries(summaryCounts)) {
+                  outputChannel.appendLine(`  ${fn}: ${cnt} error(s)`);
+                }
+                vscode.window.showInformationMessage(
+                  `FindRuntimeErr: Dynamic analysis completed. ${result.errors.length} error(s) found.`
+                );
+              })
+              .catch((error) => {
+                outputChannel.appendLine(`[Command Error] Dynamic analysis failed: ${error.message}`);
+                vscode.window.showErrorMessage(
+                  `FindRuntimeErr: Dynamic analysis failed. ${error.message}`
+                );
+              });
+          } else {
+            vscode.window.showWarningMessage(
+              "FindRuntimeErr: Please open a Python file to run dynamic analysis."
+            );
+          }
+        })
+    );
+    // Command to kill the running dynamic analysis Python process
+    context.subscriptions.push(
+      vscode.commands.registerCommand(
+        "findRuntimeErr.killPythonProcess",
+        () => {
+          if (dynamicProcess) {
+            dynamicProcess.kill();
+            outputChannel.appendLine("[Command] Python process killed by user.");
             vscode.window.showInformationMessage(
-              `FindRuntimeErr: Dynamic analysis completed. ${result.errors.length} error(s) found.`
+              "FindRuntimeErr: Python process has been terminated."
             );
-          })
-          .catch((error) => {
-            outputChannel.appendLine(`[Command Error] Dynamic analysis failed: ${error.message}`);
-            vscode.window.showErrorMessage(
-              `FindRuntimeErr: Dynamic analysis failed. ${error.message}`
+            dynamicProcess = null;
+          } else {
+            vscode.window.showWarningMessage(
+              "FindRuntimeErr: No Python process is currently running."
             );
-          });
-      } else {
-        vscode.window.showWarningMessage(
-          "FindRuntimeErr: Please open a Python file to run dynamic analysis."
-        );
-      }
-    })
-  );
+          }
+        }
+      )
+    );
 
     // --- 초기 실행 (async 함수 사용 및 getSelectedPythonPath 호출) ---
     async function runInitialAnalysis() {
