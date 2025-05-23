@@ -1,4 +1,4 @@
-# utils.py (Parso 스코프 + Astroid 타입 함수, collect_defined_variables_parso 개선)
+# utils.py (Parso 스코프 + Astroid 타입 함수, collect_defined_variables_parso 통합 및 개선)
 import astroid
 import parso
 from parso.python import tree as pt # Parso 트리 타입
@@ -26,136 +26,153 @@ def _add_parso_target_names(target_node: parso.tree.BaseNode, defined_vars: Set[
     if node_type == 'name':
         if isinstance(target_node, parso.tree.Leaf):
              defined_vars.add(target_node.value)
-    elif node_type in ('testlist_star_expr', 'exprlist', 'testlist', 'atom') and hasattr(target_node, 'children'):
+    # 튜플/리스트 언패킹 할당 (a, b = value / for a, b in iterable / def func((a,b)): )
+    # Common parent types for unpacking targets: testlist_star_expr, exprlist, testlist, atom (for parenthesized tuples)
+    elif node_type in ('testlist_star_expr', 'exprlist', 'testlist', 'atom', 'tfpdef') and hasattr(target_node, 'children'): # tfpdef for typed params
         for child in target_node.children:
             if child.type == 'name' and isinstance(child, parso.tree.Leaf):
                 defined_vars.add(child.value)
+            # 리프가 아니면서 children이 있고, 단순 토큰(연산자, 키워드, 구분자)이 아닌 경우만 재귀
             elif not isinstance(child, parso.tree.Leaf) and hasattr(child, 'children') and \
                  child.type not in ('operator', 'keyword') and \
                  (not hasattr(child, 'value') or child.value not in [',', '(', ')', '[', ']', '{', '}', ':']):
                  _add_parso_target_names(child, defined_vars)
 
 def collect_defined_variables_parso(scope_node: ParsoScopeNode) -> Set[str]:
+    """주어진 parso 스코프 노드 내에서 정의된 변수 이름을 수집합니다."""
     defined_vars: Set[str] = set()
     try:
         # 1. 함수/람다 매개변수
         if isinstance(scope_node, (pt.Function, pt.Lambda)):
             for param in scope_node.get_params():
+                # param.name은 이름(Leaf) 또는 튜플/리스트(Node)일 수 있음 (예: def func((a,b)))
+                # _add_parso_target_names가 재귀적으로 처리
                 _add_parso_target_names(param.name, defined_vars)
 
         # 2. 클래스 내부의 정의 (메서드 이름, 클래스 변수 이름)
+        #    클래스 이름 자체는 이 함수가 클래스 노드를 scope_node로 받았을 때는 해당 안됨.
+        #    (클래스 이름은 클래스를 포함하는 바깥 스코프에서 정의됨)
         if isinstance(scope_node, pt.Class):
              class_suite = scope_node.get_suite()
-             if class_suite:
-                 for node_in_class in class_suite.children:
+             if class_suite: # 클래스 본문 (suite)
+                 for node_in_class in class_suite.children: # 본문 내 각 문장/정의
+                      # 메서드 정의
                       if node_in_class.type == 'funcdef':
-                           name_node = node_in_class.children[1]
+                           name_node = node_in_class.children[1] # 'def' NAME '('
                            if name_node.type == 'name' and isinstance(name_node, parso.tree.Leaf):
                                 defined_vars.add(name_node.value)
+                      # 클래스 변수 할당 (단순 할당: var = value, 주석 할당: var: type = value)
                       elif node_in_class.type == 'simple_stmt' and len(node_in_class.children) > 0 and \
                            node_in_class.children[0].type == 'expr_stmt':
                            assign_expr = node_in_class.children[0]
-                           # 클래스 변수 일반 할당
+                           # 일반 할당
                            if len(assign_expr.children) >= 3 and assign_expr.children[1].type == 'operator' and \
                               assign_expr.children[1].value == '=':
                                 _add_parso_target_names(assign_expr.children[0], defined_vars)
-                           # 클래스 변수 주석 할당 (a: int = 1 or a: int)
+                           # 주석 할당 (a: int 또는 a: int = 1)
                            elif len(assign_expr.children) >= 2 and assign_expr.children[1].type == 'operator' and \
                                 assign_expr.children[1].value == ':':
                                 _add_parso_target_names(assign_expr.children[0], defined_vars)
 
 
-        # 3. 현재 스코프의 직계 자식 노드들 순회하며 정의 찾기
-        nodes_to_check = []
-        if isinstance(scope_node, pt.Module): nodes_to_check = scope_node.children
-        elif hasattr(scope_node, 'get_suite'): # Function, Class의 suite
+        # 3. 현재 스코프의 직계 자식 노드들 순회하며 다른 종류의 정의 찾기
+        #    (Module 본문, Function 본문(suite), Class 본문(suite), Lambda 본문(expression))
+        nodes_to_check_in_current_scope = []
+        if isinstance(scope_node, pt.Module):
+            nodes_to_check_in_current_scope = scope_node.children
+        elif hasattr(scope_node, 'get_suite'): # Function, Class
              suite = scope_node.get_suite()
-             if suite: nodes_to_check = suite.children
-        elif isinstance(scope_node, pt.Lambda): # Lambda의 body는 expression
-             if len(scope_node.children) > 1: # ':' 이후의 expression node
-                  # Lambda body에서 walrus 연산자로 정의된 이름 찾기
-                  lambda_body = scope_node.children[-1]
-                  if hasattr(lambda_body, 'iter_preorder'): # 모든 하위 노드 순회
-                       for sub_node in lambda_body.iter_preorder():
-                            if sub_node.type == 'namedexpr_test': # Walrus: NAME ':=' test
-                                 if len(sub_node.children) > 0 and sub_node.children[0].type == 'name':
-                                      if isinstance(sub_node.children[0], parso.tree.Leaf):
-                                           defined_vars.add(sub_node.children[0].value)
+             if suite: nodes_to_check_in_current_scope = suite.children
+        elif isinstance(scope_node, pt.Lambda): # Lambda: ':' expression
+             if len(scope_node.children) > 1: # children[0] is 'lambda', children[1] might be params, last is body
+                  lambda_body_expr_node = scope_node.children[-1]
+                  # Lambda body는 표현식이므로, Walrus 연산자를 제외하면 직접적인 할당은 없음
+                  # Walrus 연산자는 iter_preorder로 하위에서 찾음 (아래)
+                  nodes_to_check_in_current_scope = [lambda_body_expr_node]
 
 
-        for node in nodes_to_check:
+        for node in nodes_to_check_in_current_scope:
             node_type = node.type
-            # 할당문 (a = 1, a,b = 1,2), AnnAssign (a: int = 1 or a: int)
+
+            # A. 일반 할당문 (var = value), 주석 할당 (var: type = value)
             if node_type == 'simple_stmt' and len(node.children) > 0:
-                first_child_stmt = node.children[0]
-                if first_child_stmt.type == 'expr_stmt':
-                    if len(first_child_stmt.children) >= 2:
+                first_child_of_simple_stmt = node.children[0]
+                if first_child_of_simple_stmt.type == 'expr_stmt': # 대부분의 할당은 expr_stmt로 표현됨
+                    expr_stmt_node = first_child_of_simple_stmt
+                    if len(expr_stmt_node.children) >= 2: # 최소 target + op
                         # 일반 할당: target = value
-                        if len(first_child_stmt.children) >= 3 and first_child_stmt.children[1].type == 'operator' and \
-                           first_child_stmt.children[1].value == '=':
-                            _add_parso_target_names(first_child_stmt.children[0], defined_vars)
+                        if len(expr_stmt_node.children) >= 3 and expr_stmt_node.children[1].type == 'operator' and \
+                           expr_stmt_node.children[1].value == '=':
+                            _add_parso_target_names(expr_stmt_node.children[0], defined_vars)
                         # 주석 할당: target ':' type ['=' value]
-                        elif first_child_stmt.children[1].type == 'operator' and first_child_stmt.children[1].value == ':':
-                             _add_parso_target_names(first_child_stmt.children[0], defined_vars)
-
-            # Walrus operator (name := expr) - expr_stmt 외의 컨텍스트에서도 나타날 수 있음
-            # (if, while, list comprehension 등)
-            # iter_preorder()를 사용하여 모든 하위 노드에서 namedexpr_test 찾기
-            if hasattr(node, 'iter_preorder'):
-                for sub_node in node.iter_preorder():
-                    if sub_node.type == 'namedexpr_test': # NAME ':=' test
-                         if len(sub_node.children) > 0 and sub_node.children[0].type == 'name':
-                              if isinstance(sub_node.children[0], parso.tree.Leaf):
-                                   defined_vars.add(sub_node.children[0].value)
-
-
-            # 함수/클래스 정의 이름
+                        elif expr_stmt_node.children[1].type == 'operator' and expr_stmt_node.children[1].value == ':':
+                             _add_parso_target_names(expr_stmt_node.children[0], defined_vars)
+            # B. 함수/클래스 정의 (def func():, class MyClass:)
+            #    이 이름들은 해당 스코프(scope_node) 내에서 정의된 것으로 간주
             elif node_type in ('funcdef', 'classdef'):
-                name_node = node.children[1]
+                name_node = node.children[1] # 'def' NAME '(', 'class' NAME ['('] ':'
                 if name_node.type == 'name' and isinstance(name_node, parso.tree.Leaf):
                     defined_vars.add(name_node.value)
 
-            # Import 문
+            # C. Import 문 (import x, import x as y, from x import y, from x import y as z)
             elif node_type == 'simple_stmt' and len(node.children) > 0:
-                 import_stmt = node.children[0]
-                 if import_stmt.type in ('import_name', 'import_from'):
+                 import_stmt_node = node.children[0]
+                 if import_stmt_node.type in ('import_name', 'import_from'):
                       try:
-                          for name_leaf in import_stmt.get_defined_names():
-                               if name_leaf.value != '*': defined_vars.add(name_leaf.value)
+                          for name_leaf in import_stmt_node.get_defined_names():
+                               if name_leaf.value != '*': # 'from module import *' 제외
+                                   defined_vars.add(name_leaf.value)
                       except Exception as e: print(f"Error parsing import names: {e}", file=sys.stderr)
 
-            # For 루프 변수
+            # D. For 루프 변수 (for x in iterable:, for x, y in iterable:)
             elif node_type == 'for_stmt':
-                 if len(node.children) >= 2: # 'for' target_list 'in' ...
+                 # 'for' target_list 'in' expr_list ':' suite ['else' ':' suite]
+                 # target_list is children[1]
+                 if len(node.children) >= 2:
                      _add_parso_target_names(node.children[1], defined_vars)
 
-            # With ... as 변수
+            # E. With ... as 변수 (with open() as f:)
             elif node_type == 'with_stmt':
-                 for item_child in node.children:
-                      if item_child.type == 'with_item':
+                 # with_stmt -> with_item (',' with_item)* ':' suite
+                 for item_child in node.children: # with_item 또는 ',' 등
+                      if item_child.type == 'with_item': # with_item: test ['as' expr]
+                           # 'as' 키워드 찾고 그 다음이 target
                            for sub_idx, sub_item_child in enumerate(item_child.children):
                                if isinstance(sub_item_child, parso.tree.Leaf) and sub_item_child.value == 'as':
                                     if sub_idx + 1 < len(item_child.children):
                                          _add_parso_target_names(item_child.children[sub_idx+1], defined_vars)
-                                    break
-            # Except ... as 변수
-            elif node_type == 'try_stmt':
+                                    break # 'as' 처리 완료
+            # F. Except ... as 변수 (except Exception as e:)
+            elif node_type == 'try_stmt': # try_stmt 자식으로 except_clause
                  for child_of_try in node.children:
                       if child_of_try.type == 'except_clause':
+                           # except_clause: 'except' [test ['as' name]] ':' suite
                            as_found = False
                            for sub_child_of_except in child_of_try.children:
                                if as_found and sub_child_of_except.type == 'name':
                                     if isinstance(sub_child_of_except, parso.tree.Leaf): defined_vars.add(sub_child_of_except.value)
-                                    break
+                                    break # 이름 찾음
                                if isinstance(sub_child_of_except, parso.tree.Leaf) and sub_child_of_except.value == 'as':
                                     as_found = True
-                               elif as_found and sub_child_of_except.type != 'name':
+                               elif as_found and sub_child_of_except.type != 'name': # 'as' 다음에 이름 아닌게 오면 초기화
                                     as_found = False
+            # G. Walrus operator (name := expr) - Python 3.8+
+            #    모든 하위 노드를 순회하며 namedexpr_test (NAME ':=' test) 찾기
+            if hasattr(node, 'iter_preorder'): # Node 와 일부 Leaf 만 가짐
+                for sub_node in node.iter_preorder():
+                    if sub_node.type == 'namedexpr_test':
+                         if len(sub_node.children) > 0 and sub_node.children[0].type == 'name':
+                              if isinstance(sub_node.children[0], parso.tree.Leaf):
+                                   defined_vars.add(sub_node.children[0].value)
+
+            # TODO: Comprehension 내부 변수 (x for x in ...): Parso는 별도 스코프 생성.
+            #       Linter에서 comprehension 노드를 만나면 내부 스코프에 대해 이 함수를 재귀 호출해야 함.
+
     except Exception as e:
          scope_repr = repr(scope_node); print(f"Error in collect_defined_variables_parso for {scope_repr[:100]}...: {e}", file=sys.stderr); traceback.print_exc(file=sys.stderr)
     return defined_vars
 
-# --- Astroid 기반 함수 (이전 답변과 동일) ---
+# --- Astroid 기반 함수 (이전과 동일) ---
 def get_type_astroid(node: astroid.NodeNG) -> Optional[str]:
     try:
         inferred_list = list(node.infer(context=None));

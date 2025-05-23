@@ -1117,16 +1117,13 @@ export function activate(context: vscode.ExtensionContext) {
             const diagnosticsAtPos = diagnostics
               .filter((d) => d.range.contains(position))
               .sort((a, b) => {
-                const lineDiff =
-                  a.range.end.line -
-                  a.range.start.line -
-                  (b.range.end.line - b.range.start.line);
-                if (lineDiff !== 0) return lineDiff;
-                return (
-                  a.range.end.character -
-                  a.range.start.character -
-                  (b.range.end.character - b.range.start.character)
-                );
+                // 더 넓은 범위(더 많은 줄/컬럼을 포함하는 진단)를 우선적으로 표시
+                const aLines = a.range.end.line - a.range.start.line;
+                const bLines = b.range.end.line - b.range.start.line;
+                if (aLines !== bLines) return bLines - aLines;
+                const aChars = a.range.end.character - a.range.start.character;
+                const bChars = b.range.end.character - b.range.start.character;
+                return bChars - aChars;
               });
             if (diagnosticsAtPos.length === 0) return undefined;
             const hoverContent = new vscode.MarkdownString("", true);
@@ -1134,9 +1131,7 @@ export function activate(context: vscode.ExtensionContext) {
             diagnosticsAtPos.slice(0, 5).forEach((diagnostic, index) => {
               if (index > 0) hoverContent.appendMarkdown("\n\n---\n\n");
               hoverContent.appendMarkdown(
-                `**[${diagnostic.code || "FindRuntimeErr"}]** ${
-                  diagnostic.message
-                }`
+                `**[${diagnostic.code || "FindRuntimeErr"}]** ${diagnostic.message}`
               );
             });
             const hoverRange = diagnosticsAtPos[0].range;
