@@ -28,6 +28,8 @@ class Linter:
         except Exception as e:
             print(f"FATAL: Could not load parso grammar: {e}", file=sys.stderr)
             # self.grammar remains None
+        # RedefinedFunctionChecker를 위한 상태 초기화
+        self.scoped_definitions: Dict[Any, Dict[str, Tuple[parso.tree.BaseNode, str]]] = {} # (스코프ID -> (이름 -> (노드, 타입)))
         self._load_parso_checkers()
 
     def _load_parso_checkers(self):
@@ -88,6 +90,16 @@ class Linter:
              except Exception as e:
                   node_repr = repr(self.current_parso_node); print(f"Error getting parso scope vars for {node_repr[:100]}...: {e}", file=sys.stderr); traceback.print_exc(file=sys.stderr)
         return set()
+
+    def get_current_parso_scope_node(self) -> Optional[parso.tree.BaseNode]:
+        """현재 방문 중인 Parso 노드의 가장 가까운 부모 스코프 노드를 반환합니다."""
+        if self.current_parso_node:
+            scope = self.current_parso_node
+            while scope:
+                if scope.type in ('file_input', 'funcdef', 'classdef', 'lambdef'):
+                    return scope
+                scope = scope.parent
+        return None
 
     def visit_parso_node(self, node: parso.tree.BaseNode):
          if not self.grammar: return

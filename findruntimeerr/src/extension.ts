@@ -89,6 +89,7 @@ export function activate(context: vscode.ExtensionContext) {
           break;
         case "error":
         default:
+          
           diagnosticSeverity = vscode.DiagnosticSeverity.Error;
           break;
       }

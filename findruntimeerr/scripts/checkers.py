@@ -1,4 +1,4 @@
-# checkers.py (RTNameErrorParsoChecker _is_definition_context 개선)
+# checkers.py (RTNameErrorParsoChecker 개선, 새로운 체커 추가, 모든 Static 체커 포함)
 import astroid
 import parso
 from parso.python import tree as pt
@@ -6,10 +6,12 @@ import os
 import sys
 from typing import List, Dict, Any, Set, Optional, Tuple, Union
 import builtins
+import importlib.util # ImportExistenceChecker 용
 
-from utils import get_type_astroid, is_compatible_astroid
+# utils.py에서 필요한 함수들을 import 합니다.
+from utils import get_type_astroid, is_compatible_astroid, check_module_exists # check_module_exists 추가
 
-# --- Base Classes (이전과 동일) ---
+# --- Base Classes ---
 class BaseAstroidChecker:
     MSG_ID_PREFIX = 'E'; NAME = 'base-astroid-checker'
     MSGS: Dict[str, Tuple[str, str, str]] = {'F0001': ('Internal error (astroid): %s', 'fatal-error-astroid', '')}
@@ -17,7 +19,9 @@ class BaseAstroidChecker:
     def __init__(self, linter): self.linter = linter
     def add_message(self, node: astroid.NodeNG, msg_key: str, args: Optional[Tuple]=None):
         if self.NAME == 'base-astroid-checker': return
-        if msg_key in self.MSGS: final_message = (self.MSGS[msg_key][0] % args) if args else self.MSGS[msg_key][0]; self.linter.add_astroid_message(f"{self.MSG_ID_PREFIX}{msg_key}", node, final_message)
+        if msg_key in self.MSGS:
+            final_message = (self.MSGS[msg_key][0] % args) if args else self.MSGS[msg_key][0]
+            self.linter.add_astroid_message(f"{self.MSG_ID_PREFIX}{msg_key}", node, final_message)
         else: print(f"Warning: Unknown msg key '{msg_key}' in {self.NAME}", file=sys.stderr)
     def check(self, node: astroid.NodeNG): raise NotImplementedError
 
@@ -28,7 +32,9 @@ class BaseParsoChecker:
     def __init__(self, linter): self.linter = linter
     def add_message(self, node: parso.tree.BaseNode, msg_key: str, args: Optional[Tuple]=None):
         if self.NAME == 'base-parso-checker': return
-        if msg_key in self.MSGS: final_message = (self.MSGS[msg_key][0] % args) if args else self.MSGS[msg_key][0]; self.linter.add_message(f"{self.MSG_ID_PREFIX}{msg_key}", node, final_message)
+        if msg_key in self.MSGS:
+            final_message = (self.MSGS[msg_key][0] % args) if args else self.MSGS[msg_key][0]
+            self.linter.add_message(f"{self.MSG_ID_PREFIX}{msg_key}", node, final_message)
         else: print(f"Warning: Unknown msg key '{msg_key}' in {self.NAME}", file=sys.stderr)
     def check(self, node: parso.tree.BaseNode): raise NotImplementedError
 
@@ -53,81 +59,53 @@ class RTNameErrorParsoChecker(BaseParsoChecker):
                 return True
         return False
 
-    def _is_part_of_lhs_assignment(self, node: parso.tree.Leaf) -> bool:
-        """이름 노드가 할당문의 LHS(Left-Hand Side)에 속하는지 확인합니다."""
-        # current = node (node가 name Leaf)
-        # 위로 올라가면서 expr_stmt 또는 namedexpr_test 찾기
-        ancestor = node.parent
-        while ancestor:
-            if ancestor.type == 'expr_stmt':
-                # expr_stmt: target_exprs '=' source_expr
-                # expr_stmt: target_expr ':' type_expr ['=' source_expr]
-                target_exprs_node = ancestor.children[0]
-                # node가 target_exprs_node의 일부인지 확인
-                q = [target_exprs_node]
-                visited_lhs_parts = set()
-                while q:
-                    current_q = q.pop(0)
-                    if current_q is node: return True # node가 LHS의 일부임
-                    if hasattr(current_q, 'children'):
-                        for child_q in current_q.children:
-                            if child_q not in visited_lhs_parts and child_q.type != 'operator' and child_q.value != ',': # 연산자, 쉼표 제외
-                                q.append(child_q)
-                                visited_lhs_parts.add(child_q)
-                return False # expr_stmt인데 node가 LHS에 없으면 정의 아님 (오른쪽 사용 등)
-            elif ancestor.type == 'namedexpr_test': # walrus: NAME ':=' ...
-                if len(ancestor.children) > 0 and ancestor.children[0] is node:
-                    return True # node가 walrus의 LHS NAME임
-                return False # namedexpr_test인데 node가 LHS가 아니면 정의 아님
-            # 스코프 경계를 넘어가면 더 이상 LHS가 아님
-            if ancestor.type in ('file_input', 'suite', 'funcdef', 'classdef', 'lambdef'):
-                break
-            ancestor = ancestor.parent
-        return False
-
-    def _is_definition_name_itself(self, node: parso.tree.Leaf) -> bool:
-        """함수/클래스 정의 시 사용된 이름이거나, 파라미터 이름인지 확인합니다."""
+    def _is_definition_context(self, node: parso.tree.Leaf) -> bool:
         parent = node.parent
         if not parent: return False
         parent_type = parent.type
-
-        # 1. 함수/클래스 정의 이름 ('def NAME()', 'class NAME():')
-        if parent_type in ('funcdef', 'classdef'):
-            # Parso: funcdef -> 'def' NAME parameters ['->' test] ':' suite
-            # Parso: classdef -> 'class' NAME ['(' [arglist] ')'] ':' suite
-            # 이름은 children[1]
-            if len(parent.children) > 1 and parent.children[1].type == 'name' and parent.children[1] is node:
-                return True
-
-        # 2. 함수 파라미터 이름 (def func(PARAM): )
+        if parent_type in ('funcdef', 'classdef') and len(parent.children) > 1 and parent.children[1] is node: return True
         if parent_type == 'param':
-            # param can be NAME, or NAME ':' test, or NAME '=' test, etc.
-            # The first child of 'param' that is a 'name' Leaf is the parameter name.
-            # Also, param.name attribute should point to the name node.
-            if hasattr(parent, 'name') and parent.name is node:
-                return True
-            # Fallback: check children if parent.name is not directly the node (e.g. complex param)
-            if len(parent.children) > 0 and parent.children[0].type == 'name' and parent.children[0] is node:
-                return True
+            if hasattr(parent, 'name') and parent.name is node: return True
+            if len(parent.children) > 0 and parent.children[0].type == 'name' and parent.children[0] is node: return True
+        grandparent = parent.parent
+        if grandparent and grandparent.type == 'expr_stmt' and parent is grandparent.children[0] and parent.type == 'name':
+            if len(grandparent.children) > 1 and grandparent.children[1].type == 'operator':
+                op_val = grandparent.children[1].value
+                if op_val == '=': return True
+                if op_val == ':': return True
+        if parent.type == 'namedexpr_test' and parent.children[0] is node: return True
+        if parent_type == 'for_stmt' and len(parent.children) > 1:
+            target_list_node = parent.children[1]
+            temp_node = node
+            while temp_node:
+                if temp_node is target_list_node: return True
+                if temp_node.parent is parent: break
+                if temp_node.parent is None: break
+                temp_node = temp_node.parent
+        if parent_type == 'with_item' and len(parent.children) == 3 and isinstance(parent.children[1], parso.tree.Leaf) and parent.children[1].value == 'as':
+            target_node = parent.children[2]
+            temp_node = node
+            while temp_node:
+                if temp_node is target_node: return True
+                if temp_node.parent is parent: break
+                if temp_node.parent is None: break
+                temp_node = temp_node.parent
+        if parent_type == 'except_clause' and len(parent.children) >= 3:
+            as_found = False
+            for child_except in parent.children:
+                if isinstance(child_except, parso.tree.Leaf) and child_except.value == 'as': as_found = True; continue
+                if as_found and child_except is node: return True
         return False
 
     def check(self, node: parso.tree.Leaf):
         node_value = node.value
-
         if hasattr(builtins, node_value): return
         if self._is_attribute_name(node): return
         if self._is_keyword_arg_name(node): return
-        if self._is_definition_name_itself(node): return # 함수/클래스/파라미터 정의 이름
-        if self._is_part_of_lhs_assignment(node): return # 할당문의 왼쪽
-
-        # For 루프 변수, With As 변수, Except As 변수는 collect_defined_variables_parso가 처리하여
-        # current_scope_vars에 포함되어야 함. 따라서 아래 infer/scope check에서 걸러짐.
+        if self._is_definition_context(node): return
 
         try:
-            if not self.linter.grammar:
-                print("Warning: Parso grammar not available in Linter for infer.", file=sys.stderr)
-                return
-
+            if not self.linter.grammar: return
             definitions = list(self.linter.grammar.infer(node))
             if not definitions:
                 current_scope_vars = self.linter.get_current_scope_variables_parso()
@@ -136,14 +114,14 @@ class RTNameErrorParsoChecker(BaseParsoChecker):
         except Exception as e:
             # print(f"Infer error for '{node_value}': {e}", file=sys.stderr)
             current_scope_vars = self.linter.get_current_scope_variables_parso()
-            if node_value not in current_scope_vars:
+            if node_value not in current_scope_vars: # Fallback
                  self.add_message(node, '0101', (node_value,))
 
 class RTZeroDivisionParsoChecker(BaseParsoChecker):
     MSG_ID_PREFIX = 'E'; NAME = 'rt-zero-division-parso'; node_types = ('term', 'arith_expr', 'power')
     MSGS = {'0201': ("Potential ZeroDivisionError: Division by zero (RT-Parso)", 'division-by-zero-rt-parso', '')}
     def _get_actual_value_node(self, node: parso.tree.BaseNode) -> parso.tree.BaseNode:
-        current = node;
+        current = node; 
         while hasattr(current, 'children') and len(current.children) == 1 and current.type != 'number': current = current.children[0]
         return current
     def check(self, node: parso.tree.Node):
@@ -164,10 +142,58 @@ class RTZeroDivisionParsoChecker(BaseParsoChecker):
                            if is_zero: self.add_message(actual_r_node, '0201')
         except Exception as e: node_repr = repr(node); print(f"Error in RTZeroDivision for {node_repr[:100]}...: {e}", file=sys.stderr)
 
-# --- 상세 분석용 체커 (Astroid 기반 - 이전과 동일) ---
-# class StaticNameErrorChecker(BaseAstroidChecker): ...
-# class StaticTypeErrorChecker(BaseAstroidChecker): ...
-# (이하 모든 Static 체커 클래스 정의 - 이전 답변의 전체 내용을 여기에 붙여넣으세요)
+class ImportExistenceChecker(BaseParsoChecker):
+    MSG_ID_PREFIX = 'E'; NAME = 'import-existence-checker'
+    node_types = ('import_name', 'import_from')
+    MSGS = {'0003': ("Module '%s' not found. Potential ImportError.", 'module-not-found', '')}
+    def check(self, node: parso.tree.Node):
+        try:
+            if node.type == 'import_name':
+                paths = node.get_paths()
+                for path_parts in paths:
+                    if path_parts:
+                        top_level_module_name = path_parts[0].value
+                        if not check_module_exists(top_level_module_name): # utils.py 에 check_module_exists 필요
+                            self.add_message(path_parts[0], '0003', (top_level_module_name,))
+            elif node.type == 'import_from':
+                if len(node.children) > 1:
+                    module_part_node = node.children[1]
+                    module_name_to_check = None
+                    if module_part_node.type == 'dotted_name':
+                        if hasattr(module_part_node, 'children') and module_part_node.children:
+                            module_name_to_check = module_part_node.children[0].value
+                    elif isinstance(module_part_node, parso.tree.Leaf) and module_part_node.value not in ('.', '..'):
+                         module_name_to_check = module_part_node.value
+                    if module_name_to_check and not check_module_exists(module_name_to_check):
+                        self.add_message(module_part_node, '0003', (module_name_to_check,))
+        except Exception as e: print(f"Error in ImportExistenceChecker for {node.type}: {e}", file=sys.stderr)
+
+class RedefinedFunctionChecker(BaseParsoChecker):
+    MSG_ID_PREFIX = 'W'; NAME = 'redefined-function-checker'
+    node_types = ('funcdef', 'classdef')
+    MSGS = {'0004': ("'%s' %s redefined on line %s, previously defined on line %s.", 'redefined-name', '')}
+    def __init__(self, linter):
+        super().__init__(linter)
+        if not hasattr(linter, 'parso_scoped_definitions_for_redef'):
+            linter.parso_scoped_definitions_for_redef = {}
+    def check(self, node: parso.tree.BaseNode):
+        if not (node.type == 'funcdef' or node.type == 'classdef'): return
+        name_leaf = node.children[1]
+        if not (name_leaf.type == 'name' and isinstance(name_leaf, parso.tree.Leaf)): return
+        name_value = name_leaf.value
+        def_type_str = 'Function' if node.type == 'funcdef' else 'Class'
+        current_scope_node = self.linter.get_current_parso_scope_node() # core.py Linter에 이 메서드 필요
+        if not current_scope_node: return
+        scope_key = id(current_scope_node)
+        if scope_key not in self.linter.parso_scoped_definitions_for_redef:
+            self.linter.parso_scoped_definitions_for_redef[scope_key] = {}
+        if name_value in self.linter.parso_scoped_definitions_for_redef[scope_key]:
+            prev_def_node, prev_def_type = self.linter.parso_scoped_definitions_for_redef[scope_key][name_value]
+            self.add_message(name_leaf, '0004', (prev_def_type, name_value, node.start_pos[0], prev_def_node.start_pos[0]))
+        else:
+            self.linter.parso_scoped_definitions_for_redef[scope_key][name_value] = (node, def_type_str)
+
+# --- 상세 분석용 체커 (Astroid 기반) ---
 class StaticNameErrorChecker(BaseAstroidChecker):
     MSG_ID_PREFIX = 'E'; NAME = 'static-name-error'; node_types = (astroid.Name,)
     MSGS = {'0102': ("NameError: Name '%s' is not defined (Static)", 'undefined-variable', '')}
@@ -305,16 +331,23 @@ class StaticFileNotFoundChecker(BaseAstroidChecker):
                   if node.args and isinstance(node.args[0], astroid.Const) and isinstance(node.args[0].value, str):
                       file_path_value = node.args[0].value
                       if file_path_value and not os.path.isabs(file_path_value):
+                          # 실제 파일 시스템 접근은 주의 필요 (실행 환경, 권한 등)
+                          # 여기서는 현재 작업 디렉토리 기준으로만 확인 시도
                           if not os.path.exists(file_path_value):
                               self.add_message(node.args[0], '0901', (file_path_value,))
           except OSError as e: print(f"OSError checking file for {node.args[0].value if node.args and isinstance(node.args[0], astroid.Const) else 'N/A'}: {e}", file=sys.stderr)
           except Exception as e: print(f"Error in StaticFileNotFoundChecker for {repr(node)[:100]}...: {e}", file=sys.stderr)
 
-# --- 체커 목록 (분리 유지) ---
-RT_CHECKERS_CLASSES = [ RTNameErrorParsoChecker, RTZeroDivisionParsoChecker ]
+# --- 체커 목록 (새로운 체커 추가) ---
+RT_CHECKERS_CLASSES = [
+    RTNameErrorParsoChecker,
+    RTZeroDivisionParsoChecker,
+    ImportExistenceChecker,
+    RedefinedFunctionChecker
+]
 STATIC_CHECKERS_CLASSES = [
      StaticNameErrorChecker, StaticTypeErrorChecker, StaticAttributeErrorChecker,
      StaticIndexErrorChecker, StaticKeyErrorChecker, StaticInfiniteLoopChecker,
-     # StaticRecursionChecker 는 Linter.analyze_astroid 에서 별도 호출되므로 목록에 넣지 않음
+     # StaticRecursionChecker는 Linter.analyze_astroid 에서 별도 처리되므로 목록에서 제외
      StaticFileNotFoundChecker
 ]
