@@ -5,21 +5,21 @@ Checkers 패키지 초기화 파일.
 """
 
 # 1. Base 클래스들 import
-from .base_checkers import BaseParsoChecker, BaseAstroidChecker
+from checkers.base_checkers import BaseParsoChecker, BaseAstroidChecker
 
 # 2. 실시간 Parso 체커들 import
-from .rt_checkers.name_error_checker import RTNameErrorParsoChecker
-from .rt_checkers.zero_division_checker import RTZeroDivisionParsoChecker
+from checkers.rt_checkers.name_error_checker import RTNameErrorParsoChecker
+from checkers.rt_checkers.zero_division_checker import RTZeroDivisionParsoChecker
 
 # 3. 상세 Astroid 체커들 import
-from .static_checkers.name_error_checker import StaticNameErrorChecker
-from .static_checkers.type_error_checker import StaticTypeErrorChecker
-from .static_checkers.attribute_error_checker import StaticAttributeErrorChecker
-from .static_checkers.index_error_checker import StaticIndexErrorChecker
-from .static_checkers.key_error_checker import StaticKeyErrorChecker
-from .static_checkers.infinite_loop_checker import StaticInfiniteLoopChecker
-from .static_checkers.recursion_checker import StaticRecursionChecker
-from .static_checkers.file_not_found_checker import StaticFileNotFoundChecker
+from checkers.static_checkers.name_error_checker import StaticNameErrorChecker
+from checkers.static_checkers.type_error_checker import StaticTypeErrorChecker
+from checkers.static_checkers.attribute_error_checker import StaticAttributeErrorChecker
+from checkers.static_checkers.index_error_checker import StaticIndexErrorChecker
+from checkers.static_checkers.key_error_checker import StaticKeyErrorChecker
+from checkers.static_checkers.infinite_loop_checker import StaticInfiniteLoopChecker
+from checkers.static_checkers.recursion_checker import StaticRecursionChecker
+from checkers.static_checkers.file_not_found_checker import StaticFileNotFoundChecker
 
 # 4. 외부에서 사용할 체커 목록 정의
 RT_CHECKERS_CLASSES = [

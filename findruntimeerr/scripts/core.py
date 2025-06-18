@@ -1,4 +1,4 @@
-# scripts/core.py (Linter에 스코프 트리 빌더 추가, 함수 호출 관계 수정)
+# scripts/core.py (Linter 로직 재설계: 재귀 방문, 스코프 직접 전달)
 import parso
 from parso.python import tree as pt
 import astroid
@@ -16,7 +16,6 @@ from utils import get_type_astroid, is_compatible_astroid, collect_defined_varia
 from checkers import RT_CHECKERS_CLASSES, STATIC_CHECKERS_CLASSES, BaseParsoChecker, BaseAstroidChecker
 
 class Linter:
-    """Parso AST 순회 및 조건부 Astroid 분석 실행."""
     def __init__(self):
         print(f"[Linter.__init__] Initializing Linter", file=sys.stderr)
         self.parso_checkers: List[BaseParsoChecker] = []
@@ -49,81 +48,83 @@ class Linter:
             except Exception as e:
                  self.add_message('CheckerInitError', None, f"Error initializing parso checker {checker_class.__name__}: {e}")
 
-    def _build_parso_scope_tree(self, tree: pt.Module):
-        """Parso AST를 순회하며 스코프 트리와 심볼 테이블을 구축합니다."""
-        if not tree: return
-        print("[Linter._build_parso_scope_tree] Building scope tree...", file=sys.stderr)
-        self.root_scope = Scope(tree, parent_scope=None)
-        self.scope_map[id(tree)] = self.root_scope
+    def _build_and_visit_parso(self, node: parso.tree.BaseNode, current_scope: Scope):
+        """
+        AST를 재귀적으로 방문하며 스코프 트리를 구축하고, 동시에 체커를 실행합니다.
+        """
+        # 현재 노드가 새로운 스코프를 정의하는지 확인
+        new_scope = current_scope
+        if isinstance(node, (pt.Function, pt.Class, pt.Lambda)):
+            # 이미 이 노드에 대한 스코프가 생성되지 않았다면 새로 생성
+            if id(node) not in self.scope_map:
+                new_scope = Scope(node, parent_scope=current_scope)
+                self.scope_map[id(node)] = new_scope
+                # 새로 생성된 스코프에 심볼 채우기 (파라미터 등)
+                populate_scope_from_parso(new_scope)
+            else:
+                new_scope = self.scope_map[id(node)]
 
-        # 스택을 사용한 깊이 우선 탐색으로 스코프 트리 생성
-        nodes_to_visit: List[Tuple[parso.tree.BaseNode, Scope]] = [(tree, self.root_scope)]
+        # 현재 노드에 대해 체커 실행 (현재 스코프 정보 전달)
+        for checker in self.parso_checkers:
+            if not checker.node_types or node.type in checker.node_types:
+                try:
+                    # check 메서드가 이제 scope를 인자로 받음
+                    # 체커의 check 메서드가 2개의 인자만 받으면 TypeError 발생 가능
+                    checker.check(node, new_scope)
+                except TypeError as te:
+                    # 인자 개수 불일치 문제 디버깅
+                    if "takes 2 positional arguments but 3 were given" in str(te):
+                        # 스코프 인자 없이 다시 호출 (오래된 체커 호환용)
+                        try:
+                            checker.check(node)
+                        except Exception as e:
+                            error_msg = f"Error in legacy parso checker {checker.NAME}: {e}"; print(error_msg, file=sys.stderr); traceback.print_exc(file=sys.stderr)
+                            self.add_message('InternalParsoCheckerError', node, error_msg)
+                    else:
+                        error_msg = f"TypeError in parso checker {checker.NAME}: {te}"; print(error_msg, file=sys.stderr); traceback.print_exc(file=sys.stderr)
+                        self.add_message('InternalParsoCheckerError', node, error_msg)
+                except Exception as e:
+                    error_msg = f"Error in parso checker {checker.NAME}: {e}"; print(error_msg, file=sys.stderr); traceback.print_exc(file=sys.stderr)
+                    self.add_message('InternalParsoCheckerError', node, error_msg)
 
-        while nodes_to_visit:
-            current_node, parent_scope = nodes_to_visit.pop(0)
-
-            # 현재 노드가 새로운 스코프를 생성하는지 확인
-            current_scope = parent_scope
-            if isinstance(current_node, (pt.Function, pt.Class, pt.Lambda)):
-                 # 이미 이 노드에 대한 스코프가 생성되지 않았다면 새로 생성
-                 if id(current_node) not in self.scope_map:
-                      new_scope = Scope(current_node, parent_scope=parent_scope)
-                      self.scope_map[id(current_node)] = new_scope
-                      current_scope = new_scope
-                 else: # 이미 생성되었다면 가져오기
-                      current_scope = self.scope_map[id(current_node)]
-
-            # 현재 결정된 스코프에 심볼 채우기
-            populate_scope_from_parso(current_scope)
-
-            # 자식 노드들을 방문 목록에 추가
-            if hasattr(current_node, 'children'):
-                for child in reversed(current_node.children): # 역순으로 추가하여 깊이 우선 유지
-                    nodes_to_visit.insert(0, (child, current_scope)) # 자식은 현재 스코프를 부모로 가짐
-        print("[Linter._build_parso_scope_tree] Scope tree build finished.", file=sys.stderr)
-
+        # 자식 노드 방문
+        if hasattr(node, 'children'):
+            # 현재 노드가 생성한 새 스코프(new_scope)를 자식들에게 전달
+            for child in node.children:
+                self._build_and_visit_parso(child, new_scope)
 
     def get_scope_for_node(self, node: parso.tree.BaseNode) -> Optional[Scope]:
         """주어진 Parso 노드가 속한 가장 가까운 스코프를 반환합니다."""
         current = node
         while current:
-            if id(current) in self.scope_map:
-                return self.scope_map[id(current)]
+            # get_parent_scope()는 가장 가까운 함수/클래스/모듈 스코프 노드를 반환함
+            scope_defining_node = current.get_parent_scope()
+            if scope_defining_node and id(scope_defining_node) in self.scope_map:
+                 return self.scope_map[id(scope_defining_node)]
+            # 만약 못찾으면 한 단계 위 부모로 이동
             current = current.parent
         return self.root_scope # 최후의 수단으로 root 스코프 반환
-
-    def visit_parso_node(self, node: parso.tree.BaseNode):
-        """Parso AST 노드를 재귀적으로 방문하며 체커를 실행합니다."""
-        if not self.grammar: return
-        for checker in self.parso_checkers:
-            if not checker.node_types or node.type in checker.node_types:
-                try:
-                    if hasattr(checker, 'check') and callable(checker.check):
-                        checker.check(node)
-                except Exception as e:
-                    error_msg = f"Error in parso checker {checker.NAME}: {e}"
-                    print(error_msg, file=sys.stderr)
-                    traceback.print_exc(file=sys.stderr)
-                    self.add_message('InternalParsoCheckerError', node, error_msg)
-        if hasattr(node, 'children'):
-            for child in node.children:
-                self.visit_parso_node(child)
 
     def analyze_parso(self, tree: pt.Module):
         if not self.grammar:
              self.add_message('ParsoSetupError', None, "Parso grammar not loaded, cannot perform Parso analysis.")
              return
-        # 1. 스코프 트리 및 심볼 테이블 먼저 빌드
-        self._build_parso_scope_tree(tree)
-        # 2. AST 순회하며 체커 실행
-        print("[Linter.analyze_parso] Starting analysis (parso)...", file=sys.stderr)
+        
+        # 1. 루트 스코프 생성 및 심볼 테이블 초기화
+        self.root_scope = Scope(tree, parent_scope=None)
+        self.scope_map = {id(tree): self.root_scope}
+        
+        # 2. 스코프 빌드와 체커 실행을 동시에 시작
+        print("[Linter.analyze_parso] Starting scope building and analysis...", file=sys.stderr)
         try:
-            self.visit_parso_node(tree)
+            # 먼저 루트 스코프(모듈)에 대해 심볼을 채움
+            populate_scope_from_parso(self.root_scope)
+            # 그 다음 재귀적으로 방문 시작
+            self._build_and_visit_parso(tree, self.root_scope)
         except Exception as e:
-            print(f"!!! Exc during Parso AST traversal: {e}", file=sys.stderr)
-            traceback.print_exc(file=sys.stderr)
+            print(f"!!! Exc during Parso AST traversal: {e}", file=sys.stderr); traceback.print_exc(file=sys.stderr)
             self.add_message('ParsoTraversalError', None, f"Error: {e}")
-        print("[Linter.analyze_parso] Analysis finished (parso).", file=sys.stderr)
+        print("[Linter.analyze_parso] Analysis finished.", file=sys.stderr)
 
     def add_message(self, msg_id: str, node: Optional[parso.tree.BaseNode], message: str):
         try:
@@ -198,7 +199,7 @@ class Linter:
                           for func_node in tree.nodes_of_class(astroid.FunctionDef): checker.check_function_recursion(func_node)
                      except Exception as e: print(f"Error in recursion checker {checker.NAME}: {e}", file=sys.stderr)
         except Exception as e: print(f"!!! Exc during Astroid AST traversal: {e}", file=sys.stderr); traceback.print_exc(file=sys.stderr); self.add_message('AstroidTraversalError', None, f"Error: {e}")
-        print("[Linter.analyze_astroid] Analysis finished (astroid).", file=sys.stderr)
+        print("[Linter.analyze_astroid] Analysis finished.", file=sys.stderr)
 
     def add_node_to_graph(self, node_name: str, **kwargs):
         if not isinstance(node_name, str) or not node_name: return
@@ -271,7 +272,7 @@ def analyze_code(code: str, mode: str = 'realtime') -> Dict[str, Any]:
                     call_graph_data = None
             except ImportError:
                 print("Error: networkx not found for graph.", file=sys.stderr)
-                linter.add_message('GraphError', None, "networkx library not found.")
+                linter.add_message('GraphError', None, "networkx not found.")
                 call_graph_data = None
             except Exception as e:
                 print(f"Error converting graph: {e}", file=sys.stderr)

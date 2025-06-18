@@ -1,19 +1,21 @@
 import parso
 from parso.python import tree as pt
 import sys
-from ..base_checkers import BaseParsoChecker
+
+from checkers.base_checkers import BaseParsoChecker
+from symbol_table import Scope
 
 class RTZeroDivisionParsoChecker(BaseParsoChecker):
-    MSG_ID_PREFIX = 'E'; NAME = 'rt-zero-division-parso'; node_types = ('term', 'arith_expr', 'power')
-    MSGS = {'0201': ("Potential ZeroDivisionError: Division by zero (RT-Parso)", 'division-by-zero-rt-parso', '')}
+    NAME = "rt-zero-division-parso"
+    node_types = ("atom_expr",)
+    MSGS = {
+        "0102": ("ZeroDivisionError: division by zero (RT-Parso)", "zero-division-rt-parso", "")
+    }
 
-    def _get_actual_value_node(self, node: parso.tree.BaseNode) -> parso.tree.BaseNode:
-        current = node
-        while hasattr(current, 'children') and len(current.children) == 1 and current.type != 'number':
-            current = current.children[0]
-        return current
-
-    def check(self, node: parso.tree.Node):
+    def check(self, node: parso.tree.Node, current_scope: Scope):
+        """
+        ZeroDivisionError를 검사합니다. (스코프 인자 추가, 미사용이어도 반드시 받아야 함)
+        """
         try:
             if hasattr(node, 'children') and len(node.children) >= 3:
                 op_idx = -1

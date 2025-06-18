@@ -1,4 +1,4 @@
-# utils.py (심볼 테이블 채우는 역할로 변경, 순환 참조 수정)
+# utils.py (심볼 테이블 채우는 역할, 순환 참조 수정)
 import astroid
 import parso
 from parso.python import tree as pt
@@ -94,14 +94,7 @@ def populate_scope_from_parso(scope: Scope):
             for param in scope_node.get_params():
                 _add_parso_target_names_to_scope(param, scope, SymbolType.PARAMETER)
 
-        # 2. 클래스 내부 정의 (메서드, 클래스 변수)
-        if isinstance(scope_node, pt.Class):
-             class_suite = scope_node.get_suite()
-             if class_suite:
-                 for node_in_class in class_suite.children:
-                     _populate_scope_from_parso_node(node_in_class, scope)
-
-        # 3. 현재 스코프의 본문에 있는 직계 자식 노드들 순회
+        # 2. 현재 스코프의 본문(suite)에 있는 직계 자식 노드들 순회
         nodes_to_check = []
         if isinstance(scope_node, pt.Module):
             nodes_to_check = scope_node.children
@@ -124,7 +117,7 @@ def check_module_exists(module_name: str) -> bool:
     except Exception:
         return True
 
-# --- Astroid 기반 함수 (Static 체커들이 사용) ---
+# --- Astroid 기반 함수 ---
 def get_type_astroid(node: astroid.NodeNG) -> Optional[str]:
     try:
         inferred_list = list(node.infer(context=None));
