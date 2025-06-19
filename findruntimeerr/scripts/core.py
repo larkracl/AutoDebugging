@@ -149,6 +149,8 @@ class Linter:
              line = max(1, line); col = max(0, col); to_line = max(line, to_line); end_col = max(col + 1, end_col)
              error_key = (msg_id, line, col, to_line, end_col)
              if not any(err.get('_key') == error_key for err in self.errors):
+                 # --- 디버깅 로그 추가 ---
+                 print(f"DEBUG: [Astroid Linter] ADDING error: {msg_id} - {message}", file=sys.stderr)
                  self.errors.append({ 'message': message, 'line': line, 'column': col, 'to_line': to_line, 'end_column': end_col, 'errorType': msg_id, '_key': error_key })
          except Exception as e:
              print(f"Error adding astroid message '{msg_id}': {e}", file=sys.stderr)
@@ -227,64 +229,64 @@ class Linter:
 
 
 def analyze_code(code: str, mode: str = 'realtime') -> Dict[str, Any]:
-    print(f"analyze_code (Parso+Astroid) called with mode: {mode}", file=sys.stderr)
-    syntax_errors: List[Dict[str, Any]] = []; call_graph_data: Optional[Dict[str, Any]] = None
+    print(f"analyze_code (Mode-Separated) called with mode: {mode}", file=sys.stderr)
     linter = Linter()
-    parso_tree: Optional[pt.Module] = None
+    call_graph_data: Optional[Dict[str, Any]] = None
+    final_errors: List[Dict[str, Any]] = []
 
-    if not linter.grammar:
-         linter.add_message("ParsoSetupError", None, "Failed to load Parso grammar. Analysis incomplete.")
-    else:
-        try:
-            parso_tree = linter.grammar.parse(code, error_recovery=True)
-            print(f"Parso AST parsed (error recovery enabled)", file=sys.stderr)
-            for error in linter.grammar.iter_errors(parso_tree):
-                 line, col = error.start_pos; to_line, end_col = error.end_pos
-                 syntax_errors.append({'message': f"SyntaxError: {error.message}", 'line': line, 'column': col, 'to_line': to_line, 'end_column': max(col + 1, end_col), 'errorType': 'SyntaxError'})
-            print(f"Found {len(syntax_errors)} syntax errors during parso parsing.", file=sys.stderr)
-        except Exception as e: print(f"!!! CRITICAL Exc during parso parsing: {e}", file=sys.stderr); traceback.print_exc(file=sys.stderr); linter.add_message('ParsoCrashError', None, f"Critical Parso parsing error: {e}"); parso_tree = None
+    # ====================================================================
+    # 'realtime' 모드: Parso 파싱 + Parso RT 체커 실행
+    # ====================================================================
+    if mode == 'realtime':
+        syntax_errors: List[Dict[str, Any]] = []
+        parso_tree: Optional[pt.Module] = None
+        if not linter.grammar:
+             linter.add_message("ParsoSetupError", None, "Parso grammar not loaded.")
+        else:
+            try:
+                parso_tree = linter.grammar.parse(code, error_recovery=True)
+                print(f"Parso AST parsed for realtime.", file=sys.stderr)
+                for error in linter.grammar.iter_errors(parso_tree):
+                     line, col = error.start_pos; to_line, end_col = error.end_pos
+                     syntax_errors.append({'message': f"SyntaxError: {error.message}", 'line': line, 'column': col, 'to_line': to_line, 'end_column': max(col + 1, end_col), 'errorType': 'SyntaxError'})
+                print(f"Found {len(syntax_errors)} syntax errors.", file=sys.stderr)
+            except Exception as e:
+                 linter.add_message('ParsoCrashError', None, f"Critical Parso parsing error: {e}")
 
-    if parso_tree is not None:
-        linter.analyze_parso(parso_tree)
+        if parso_tree is not None:
+            linter.analyze_parso(parso_tree) # Parso RT 체커 실행
 
-    astroid_tree: Optional[astroid.Module] = None
-    run_astroid_analysis = (not syntax_errors and mode == 'static')
-    if run_astroid_analysis:
-        print("[analyze_code] No syntax errors, mode 'static'. Proceeding with Astroid.", file=sys.stderr)
+        final_errors = syntax_errors + linter.errors
+
+    # ====================================================================
+    # 'static' 모드: Astroid 파싱 + Astroid Static 체커만 실행
+    # ====================================================================
+    elif mode == 'static':
+        astroid_tree: Optional[astroid.Module] = None
         try:
             astroid_tree = astroid.parse(code, module_name='<string>')
             print(f"Astroid AST parsed for static analysis.", file=sys.stderr)
         except SyntaxError as e:
-            print(f"UNEXPECTED SyntaxError in astroid (static): {e}", file=sys.stderr)
-            l, c = e.lineno or 1, (e.offset or 1) -1
-            linter.add_message('AstroidSyntaxError', None, f"Astroid SyntaxError: {e.msg} L{l}:C{c+1}")
+            # SyntaxError 발생 시, 이 오류 하나만 보고하고 종료
+            error = {'message': f"SyntaxError: {e.msg}", 'line': e.lineno or 1, 'column': (e.offset or 1) - 1, 'to_line': e.lineno or 1, 'end_column': (e.offset or 1), 'errorType': 'SyntaxError'}
+            final_errors.append(error)
+            # 'static' 모드에서는 SyntaxError 발생 시 더 이상 진행하지 않음
         except Exception as e:
-            print(f"!!! Exc in astroid parsing (static): {e}", file=sys.stderr); traceback.print_exc(file=sys.stderr)
-            linter.add_message('AstroidParsingError', None, f"Error parsing with Astroid: {e}")
+             linter.add_message('AstroidParsingError', None, f"Error parsing with Astroid: {e}")
+             final_errors = linter.errors
+
         if astroid_tree is not None:
+            # Astroid 상세 분석 실행 (그래프 생성 포함)
             linter.analyze_astroid(astroid_tree)
             try:
-                if linter.call_graph.nodes:
-                    call_graph_data = json_graph.node_link_data(linter.call_graph)
-                    print("[analyze_code] Call graph generated.", file=sys.stderr)
-                else:
-                    print("[analyze_code] Call graph empty.", file=sys.stderr)
-                    call_graph_data = None
-            except ImportError:
-                print("Error: networkx not found for graph.", file=sys.stderr)
-                linter.add_message('GraphError', None, "networkx not found.")
-                call_graph_data = None
-            except Exception as e:
-                print(f"Error converting graph: {e}", file=sys.stderr)
-                linter.add_message('GraphError', None, f"Failed to convert graph: {e}")
-                call_graph_data = None
-    elif mode == 'static':
-        print("[analyze_code] Syntax errors present. Skipping Astroid for static mode.", file=sys.stderr)
+                if linter.call_graph.nodes: call_graph_data = json_graph.node_link_data(linter.call_graph)
+            except Exception as e: linter.add_message('GraphError', None, f"Failed to convert call graph: {e}")
+            final_errors = linter.errors # Astroid 체커 결과만 사용
+    else:
+        final_errors = [{'message': f"Unknown analysis mode: {mode}", 'line': 1, 'column': 0, 'to_line': 1, 'end_column': 1, 'errorType': 'ModeError'}]
 
-    all_errors = syntax_errors + linter.errors
-    cleaned_errors = [{k: v for k, v in err.items() if k != '_key'} for err in all_errors]
+    # 최종 결과 반환
+    cleaned_errors = [{k: v for k, v in err.items() if k != '_key'} for err in final_errors]
     result = {'errors': cleaned_errors, 'call_graph': call_graph_data}
-    if not isinstance(result.get('errors'), list):
-        result['errors'] = []
-    print(f"analyze_code returning {len(result['errors'])} total errors.", file=sys.stderr)
+    print(f"analyze_code returning {len(result['errors'])} errors for mode '{mode}'.", file=sys.stderr)
     return result

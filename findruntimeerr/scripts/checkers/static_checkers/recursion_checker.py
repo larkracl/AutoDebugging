@@ -6,10 +6,13 @@ class StaticRecursionChecker(BaseAstroidChecker):
     MSG_ID_PREFIX = 'W'; NAME = 'static-recursion'; node_types = (astroid.FunctionDef,)
     MSGS = {'0701': ("Warning: Possible infinite recursion (Static)", 'infinite-recursion', '')}
     def check_function_recursion(self, node: astroid.FunctionDef):
+        # --- 디버깅 로그 추가 ---
+        print(f"DEBUG: Running {self.NAME} recursion check on function: {node.name}", file=sys.stderr)
         try:
             # 함수 내부에서 자기 자신을 호출하는 경우 감지
             for call in node.nodes_of_class(astroid.Call):
                 if hasattr(call.func, 'name') and call.func.name == node.name:
+                    print(f"DEBUG: {self.NAME} FOUND a recursion warning in function '{node.name}'", file=sys.stderr)
                     self.add_message(node, '0701')
                     break
         except Exception as e:

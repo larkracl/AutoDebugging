@@ -1,4 +1,4 @@
-# utils.py (심볼 테이블 채우는 역할, 순환 참조 수정)
+# utils.py (심볼 테이블 채우는 역할에 집중하도록 재설계)
 import astroid
 import parso
 from parso.python import tree as pt
@@ -14,42 +14,50 @@ from symbol_table import Symbol, Scope, SymbolType
 AstroidScopeNode = Union[astroid.Module, astroid.FunctionDef, astroid.Lambda, astroid.ClassDef, astroid.GeneratorExp, astroid.ListComp, astroid.SetComp, astroid.DictComp]
 ParsoScopeNode = Union[pt.Module, pt.Function, pt.Class, pt.Lambda]
 
-# --- Parso 기반 함수 ---
+
+# --- Parso 기반 함수 (스코프 채우기용) ---
 
 def _add_parso_target_names_to_scope(target_node: parso.tree.BaseNode, scope: Scope, symbol_type: SymbolType = SymbolType.VARIABLE):
     """Helper: Parso 할당/정의 대상 노드에서 변수 이름을 추출하여 주어진 스코프에 Symbol로 정의합니다."""
     node_type = target_node.type
-    if node_type == 'param': # 파라미터 노드 처리 추가
+    # 파라미터 노드(param) 자체를 처리
+    if node_type == 'param':
         # param 노드의 첫 번째 자식(보통 name)에 대해 재귀 호출
         if hasattr(target_node, 'children') and len(target_node.children) > 0:
              _add_parso_target_names_to_scope(target_node.children[0], scope, symbol_type)
-        return # param 노드 처리는 여기서 종료
+        return
 
+    # 실제 이름(Leaf)을 찾았을 때
     if node_type == 'name':
         if isinstance(target_node, parso.tree.Leaf):
              scope.define(Symbol(target_node.value, symbol_type, target_node))
+    # 튜플/리스트 언패킹 처리
     elif node_type in ('testlist_star_expr', 'exprlist', 'testlist', 'atom', 'tfpdef') and hasattr(target_node, 'children'):
         for child in target_node.children:
             # 재귀적으로 내부의 이름들을 찾아 스코프에 추가
             _add_parso_target_names_to_scope(child, scope, symbol_type)
 
 
-def _populate_scope_from_parso_node(node: parso.tree.BaseNode, current_scope: Scope):
-    """주어진 Parso 노드를 분석하여 이름 정의를 찾아 현재 스코프에 추가하는 헬퍼 함수."""
+def _populate_scope_from_node_recursive(node: parso.tree.BaseNode, current_scope: Scope):
+    """
+    주어진 Parso 노드와 그 하위를 재귀적으로 탐색하며 정의를 찾아 현재 스코프에 추가합니다.
+    새로운 스코프(함수/클래스)를 만나면 재귀를 중단합니다.
+    """
     node_type = node.type
 
-    # A. 함수 정의
-    if node_type == 'funcdef':
+    # 1. 새로운 스코프(함수/클래스) 정의 - 현재 스코프에 이름만 정의하고, 내부는 탐색하지 않음
+    if node_type in ('funcdef', 'classdef'):
         name_node = node.children[1]
         if name_node.type == 'name' and isinstance(name_node, parso.tree.Leaf):
-            current_scope.define(Symbol(name_node.value, SymbolType.FUNCTION, name_node))
-    # B. 클래스 정의
-    elif node_type == 'classdef':
-        name_node = node.children[1]
-        if name_node.type == 'name' and isinstance(name_node, parso.tree.Leaf):
-            current_scope.define(Symbol(name_node.value, SymbolType.CLASS, name_node))
-    # C. Import 문
-    elif node_type == 'simple_stmt' and len(node.children) > 0 and node.children[0].type in ('import_name', 'import_from'):
+            symbol_type = SymbolType.FUNCTION if node_type == 'funcdef' else SymbolType.CLASS
+            current_scope.define(Symbol(name_node.value, symbol_type, name_node))
+        # 새로운 스코프가 시작되므로, 이 노드의 자식들은 여기서 더 이상 탐색하지 않음.
+        # 스코프 트리를 만드는 Linter의 _build_and_visit_parso에서 처리할 것임.
+        return # *** 재귀 중단 ***
+
+    # 2. 다른 모든 정의 구문 처리
+    # Import 문
+    if node_type == 'simple_stmt' and len(node.children) > 0 and node.children[0].type in ('import_name', 'import_from'):
         import_stmt = node.children[0]
         try:
             for name_leaf in import_stmt.get_defined_names():
@@ -57,36 +65,38 @@ def _populate_scope_from_parso_node(node: parso.tree.BaseNode, current_scope: Sc
                     symbol_type = SymbolType.MODULE if import_stmt.type == 'import_name' else SymbolType.IMPORTED_NAME
                     current_scope.define(Symbol(name_leaf.value, symbol_type, name_leaf))
         except Exception as e: print(f"Error parsing import names: {e}", file=sys.stderr)
-    # D. 일반/주석 할당문 (var = value / var: type = value)
+    # 일반/주석 할당문
     elif node_type == 'simple_stmt' and len(node.children) > 0 and node.children[0].type == 'expr_stmt':
         expr_stmt = node.children[0]
         if len(expr_stmt.children) >= 2 and expr_stmt.children[1].type == 'operator':
-            op_val = expr_stmt.children[1].value
-            if op_val == '=' or op_val == ':':
+            if expr_stmt.children[1].value == '=' or expr_stmt.children[1].value == ':':
                 _add_parso_target_names_to_scope(expr_stmt.children[0], current_scope)
-    # E. For 루프 변수
+    # For 루프 변수
     elif node_type == 'for_stmt':
         if len(node.children) >= 2: _add_parso_target_names_to_scope(node.children[1], current_scope)
-    # F. With/as, Except/as, Walrus 등 복합문 내부
-    if hasattr(node, 'iter_preorder'):
-        for sub_node in node.iter_preorder():
-            sub_node_type = sub_node.type
-            if sub_node_type == 'with_item':
-                for i, item_child in enumerate(sub_node.children):
-                     if isinstance(item_child, parso.tree.Leaf) and item_child.value == 'as':
-                          if i + 1 < len(sub_node.children): _add_parso_target_names_to_scope(sub_node.children[i+1], current_scope); break
-            elif sub_node_type == 'except_clause':
-                as_found = False
-                for except_child in sub_node.children:
-                     if as_found and except_child.type == 'name':
-                          if isinstance(except_child, parso.tree.Leaf): current_scope.define(Symbol(except_child.value, SymbolType.VARIABLE, except_child)); break
-                     if isinstance(except_child, parso.tree.Leaf) and except_child.value == 'as': as_found = True
-                     elif as_found: as_found = False
-            elif sub_node_type == 'namedexpr_test': # Walrus operator
-                 if len(sub_node.children) > 0 and sub_node.children[0].type == 'name':
-                      name_leaf = sub_node.children[0]
-                      if isinstance(name_leaf, parso.tree.Leaf):
-                           current_scope.define(Symbol(name_leaf.value, SymbolType.VARIABLE, name_leaf))
+    # With ... as 변수
+    elif node_type == 'with_item':
+        for i, item_child in enumerate(node.children):
+            if isinstance(item_child, parso.tree.Leaf) and item_child.value == 'as':
+                if i + 1 < len(node.children): _add_parso_target_names_to_scope(node.children[i+1], current_scope)
+    # Except ... as 변수
+    elif node_type == 'except_clause':
+        as_found = False
+        for child in node.children:
+            if as_found and child.type == 'name':
+                if isinstance(child, parso.tree.Leaf): current_scope.define(Symbol(child.value, SymbolType.VARIABLE, child)); break
+            if isinstance(child, parso.tree.Leaf) and child.value == 'as': as_found = True
+            elif as_found: as_found = False
+    # Walrus 연산자
+    elif node_type == 'namedexpr_test':
+        if len(node.children) > 0 and node.children[0].type == 'name':
+            if isinstance(node.children[0], parso.tree.Leaf):
+                current_scope.define(Symbol(node.children[0].value, SymbolType.VARIABLE, node.children[0]))
+
+    # 3. 다른 모든 자식 노드는 재귀적으로 하위 탐색
+    if hasattr(node, 'children'):
+        for child in node.children:
+            _populate_scope_from_node_recursive(child, current_scope)
 
 
 def populate_scope_from_parso(scope: Scope):
@@ -95,25 +105,24 @@ def populate_scope_from_parso(scope: Scope):
     """
     scope_node = scope.node
     try:
-        # 1. 함수/람다 매개변수
+        # 1. 함수/람다 매개변수 먼저 수집
         if isinstance(scope_node, (pt.Function, pt.Lambda)):
             for param in scope_node.get_params():
                 _add_parso_target_names_to_scope(param, scope, SymbolType.PARAMETER)
 
         # 2. 현재 스코프의 본문(suite)에 있는 직계 자식 노드들 순회
-        nodes_to_check = []
+        nodes_to_process = []
         if isinstance(scope_node, pt.Module):
-            nodes_to_check = scope_node.children
+            nodes_to_process = scope_node.children
         elif hasattr(scope_node, 'get_suite'): # Function, Class
              suite = scope_node.get_suite()
-             if suite: nodes_to_check = suite.children
+             if suite: nodes_to_process = suite.children
 
-        for node in nodes_to_check:
-            _populate_scope_from_parso_node(node, scope)
+        for node in nodes_to_process:
+            _populate_scope_from_node_recursive(node, scope)
 
     except Exception as e:
          scope_repr = repr(scope_node); print(f"Error in populate_scope_from_parso for {scope_repr[:100]}...: {e}", file=sys.stderr); traceback.print_exc(file=sys.stderr)
-
 
 def check_module_exists(module_name: str) -> bool:
     if not module_name or module_name.startswith('.'): return True
@@ -202,3 +211,64 @@ def collect_defined_variables_astroid(scope_node: AstroidScopeNode) -> Set[str]:
      except Exception as e:
          scope_name = getattr(scope_node, 'name', type(scope_node).__name__); print(f"Error collecting astroid vars in '{scope_name}': {e}", file=sys.stderr); traceback.print_exc(file=sys.stderr)
      return defined_vars
+
+def _populate_scope_from_parso_node(node: parso.tree.BaseNode, current_scope: Scope):
+    """주어진 Parso 노드와 그 하위에서 정의를 찾아 현재 스코프에 추가합니다."""
+    node_type = node.type
+
+    # A. 새로운 스코프(함수/클래스)를 만나면, 이름만 정의하고 내부 탐색은 중단.
+    #    (내부 탐색은 Linter의 메인 방문 로직에서 새로운 Scope 객체와 함께 시작됨)
+    if node_type in ('funcdef', 'classdef'):
+        name_node = node.children[1]
+        if name_node.type == 'name' and isinstance(name_node, parso.tree.Leaf):
+            symbol_type = SymbolType.FUNCTION if node_type == 'funcdef' else SymbolType.CLASS
+            current_scope.define(Symbol(name_node.value, symbol_type, name_node))
+        return # *** 재귀 중단 ***
+
+    # B. 다른 모든 정의 구문 처리
+    # Import 문
+    if node_type == 'simple_stmt' and len(node.children) > 0 and node.children[0].type in ('import_name', 'import_from'):
+        import_stmt = node.children[0]
+        try:
+            for name_leaf in import_stmt.get_defined_names():
+                if name_leaf.value != '*':
+                    symbol_type = SymbolType.MODULE if import_stmt.type == 'import_name' else SymbolType.IMPORTED_NAME
+                    current_scope.define(Symbol(name_leaf.value, symbol_type, name_leaf))
+        except Exception as e: print(f"Error parsing import names: {e}", file=sys.stderr)
+    # 할당문
+    elif node_type == 'simple_stmt' and len(node.children) > 0 and node.children[0].type == 'expr_stmt':
+        expr_stmt = node.children[0]
+        if len(expr_stmt.children) >= 2 and expr_stmt.children[1].type == 'operator':
+            op_val = expr_stmt.children[1].value
+            if op_val == '=' or op_val == ':':
+                _add_parso_target_names_to_scope(expr_stmt.children[0], current_scope)
+    # For 루프 변수
+    elif node_type == 'for_stmt':
+        if len(node.children) >= 2:
+            _add_parso_target_names_to_scope(node.children[1], current_scope)
+    # With ... as 변수
+    elif node_type == 'with_item':
+        for i, item_child in enumerate(node.children):
+            if isinstance(item_child, parso.tree.Leaf) and item_child.value == 'as':
+                if i + 1 < len(node.children):
+                    _add_parso_target_names_to_scope(node.children[i+1], current_scope)
+    # Except ... as 변수
+    elif node_type == 'except_clause':
+        as_found = False
+        for child in node.children:
+            if as_found and child.type == 'name':
+                if isinstance(child, parso.tree.Leaf):
+                    current_scope.define(Symbol(child.value, SymbolType.VARIABLE, child)); break
+            if isinstance(child, parso.tree.Leaf) and child.value == 'as': as_found = True
+            elif as_found: as_found = False
+    # Walrus 연산자
+    elif node_type == 'namedexpr_test':
+        if len(node.children) > 0 and node.children[0].type == 'name':
+            if isinstance(node.children[0], parso.tree.Leaf):
+                current_scope.define(Symbol(node.children[0].value, SymbolType.VARIABLE, node.children[0]))
+
+    # C. 자식 노드 재귀 탐색
+    if hasattr(node, 'children'):
+        for child in node.children:
+            # funcdef/classdef는 위에서 이미 return 했으므로 여기서는 재귀 안 함.
+            _populate_scope_from_parso_node(child, current_scope)

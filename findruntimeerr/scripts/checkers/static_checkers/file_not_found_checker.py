@@ -7,6 +7,8 @@ class StaticFileNotFoundChecker(BaseAstroidChecker):
     MSG_ID_PREFIX = 'E'; NAME = 'static-file-not-found'; node_types = (astroid.Call,)
     MSGS = {'0801': ("FileNotFoundError: File '%s' may not exist (Static)", 'file-not-found', '')}
     def check(self, node: astroid.Call):
+        # --- 디버깅 로그 추가 ---
+        print(f"DEBUG: Running {self.NAME} on node: {node.as_string()}", file=sys.stderr)
         try:
             func = node.func
             is_open = False
@@ -26,9 +28,11 @@ class StaticFileNotFoundChecker(BaseAstroidChecker):
                     except Exception:
                         exists = False
                     if not exists:
+                        print(f"DEBUG: {self.NAME} FOUND an error for file '{file_path}' (not found)", file=sys.stderr)
                         self.add_message(node, '0801', (file_path,))
                 else:
                     # 동적 경로(상수 아님)는 항상 경고
+                    print(f"DEBUG: {self.NAME} FOUND a warning for dynamic file arg: {str(file_arg)}", file=sys.stderr)
                     self.add_message(node, '0801', (str(file_arg),))
         except Exception as e:
             print(f"Error in StaticFileNotFoundChecker: {e}", file=sys.stderr)
