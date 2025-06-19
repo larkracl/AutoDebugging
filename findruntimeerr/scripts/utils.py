@@ -19,6 +19,12 @@ ParsoScopeNode = Union[pt.Module, pt.Function, pt.Class, pt.Lambda]
 def _add_parso_target_names_to_scope(target_node: parso.tree.BaseNode, scope: Scope, symbol_type: SymbolType = SymbolType.VARIABLE):
     """Helper: Parso 할당/정의 대상 노드에서 변수 이름을 추출하여 주어진 스코프에 Symbol로 정의합니다."""
     node_type = target_node.type
+    if node_type == 'param': # 파라미터 노드 처리 추가
+        # param 노드의 첫 번째 자식(보통 name)에 대해 재귀 호출
+        if hasattr(target_node, 'children') and len(target_node.children) > 0:
+             _add_parso_target_names_to_scope(target_node.children[0], scope, symbol_type)
+        return # param 노드 처리는 여기서 종료
+
     if node_type == 'name':
         if isinstance(target_node, parso.tree.Leaf):
              scope.define(Symbol(target_node.value, symbol_type, target_node))
