@@ -1,19 +1,20 @@
+# scripts/checkers/static_checkers/recursion_checker.py
 import astroid
 import sys
-from ..base_checkers import BaseAstroidChecker
+
+# *** 수정된 import 경로 ***
+from checkers.base_checkers import BaseAstroidChecker
 
 class StaticRecursionChecker(BaseAstroidChecker):
-    MSG_ID_PREFIX = 'W'; NAME = 'static-recursion'; node_types = (astroid.FunctionDef,)
-    MSGS = {'0701': ("Warning: Possible infinite recursion (Static)", 'infinite-recursion', '')}
-    def check_function_recursion(self, node: astroid.FunctionDef):
-        # --- 디버깅 로그 추가 ---
-        print(f"DEBUG: Running {self.NAME} recursion check on function: {node.name}", file=sys.stderr)
+    MSG_ID_PREFIX = 'W'; NAME = 'static-recursion'
+    MSGS = {'0801': ("Potential recursion: Function '%s' calls itself (Static)", 'recursive-call','')}
+    def check_function_recursion(self, func_node: astroid.FunctionDef):
+        # print(f"DEBUG: Running {self.NAME} on function: {func_node.name}", file=sys.stderr)
+        func_name = func_node.name
         try:
-            # 함수 내부에서 자기 자신을 호출하는 경우 감지
-            for call in node.nodes_of_class(astroid.Call):
-                if hasattr(call.func, 'name') and call.func.name == node.name:
-                    print(f"DEBUG: {self.NAME} FOUND a recursion warning in function '{node.name}'", file=sys.stderr)
-                    self.add_message(node, '0701')
-                    break
-        except Exception as e:
-            print(f"Error in StaticRecursionChecker: {e}", file=sys.stderr)
+             for call_node in func_node.nodes_of_class(astroid.Call):
+                 if isinstance(call_node.func, astroid.Name) and call_node.func.name == func_name:
+                     if call_node.scope() is func_node:
+                          print(f"DEBUG: {self.NAME} FOUND a recursive call in '{func_name}'", file=sys.stderr)
+                          self.add_message(call_node.func, '0801', (func_name,)); return
+        except Exception as e: print(f"Error checking recursion for {func_name}: {e}", file=sys.stderr)
