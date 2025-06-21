@@ -13,9 +13,6 @@ class RTZeroDivisionParsoChecker(BaseParsoChecker):
     }
 
     def check(self, node: parso.tree.Node, current_scope: Scope):
-        """
-        ZeroDivisionError를 검사합니다. (스코프 인자 추가, 미사용이어도 반드시 받아야 함)
-        """
         try:
             if hasattr(node, 'children') and len(node.children) >= 3:
                 op_idx = -1
@@ -37,5 +34,4 @@ class RTZeroDivisionParsoChecker(BaseParsoChecker):
                         if is_zero:
                             self.add_message(actual_r_node, '0201')
         except Exception as e:
-            node_repr = repr(node)
-            print(f"Error in RTZeroDivision for {node_repr[:100]}...: {e}", file=sys.stderr)
+            pass

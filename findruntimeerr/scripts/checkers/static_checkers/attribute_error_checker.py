@@ -13,15 +13,10 @@ class StaticAttributeErrorChecker(BaseAstroidChecker):
     }
 
     def check(self, node: astroid.Attribute):
-        # print(f"DEBUG: Running {self.NAME} on node: {node.as_string()}", file=sys.stderr)
-
         try:
-            # *** 수정 1: node.value -> node.expr ***
-            # Attribute 노드에서 속성이 접근되는 객체(왼쪽 부분)는 .expr 속성입니다.
             inferred_values = list(node.expr.infer(context=None))
 
             if not inferred_values: # 타입을 전혀 추론할 수 없으면 검사 불가
-                # print(f"DEBUG: Cannot infer type for: {node.expr.as_string()}", file=sys.stderr)
                 return
 
             has_attribute = False
@@ -36,7 +31,6 @@ class StaticAttributeErrorChecker(BaseAstroidChecker):
                 # NoneType 체크
                 if isinstance(inferred, astroid.Const) and inferred.value is None:
                     if not none_error_reported:
-                        print(f"DEBUG: {self.NAME} FOUND a NoneType error for '{node.attrname}'", file=sys.stderr)
                         # *** 수정 2: node.attrname -> node ***
                         # add_message에는 위치 정보를 위해 전체 Attribute 노드를 전달해야 합니다.
                         self.add_message(node, '0402', (node.attrname,))
@@ -67,7 +61,6 @@ class StaticAttributeErrorChecker(BaseAstroidChecker):
                 # Uninferable을 제외하고 유효한 타입 이름들만 조합하여 메시지 생성
                 types_str = ", ".join(sorted(list(set(pt for pt in possible_types if pt != "Uninferable"))))
                 if types_str: # 타입 정보가 있을 때만 보고
-                    print(f"DEBUG: {self.NAME} FOUND a no-member error for '{node.attrname}' on types '{types_str}'", file=sys.stderr)
                     # *** 수정 3: node.attrname -> node ***
                     # add_message에는 위치 정보를 위해 전체 Attribute 노드를 전달해야 합니다.
                     self.add_message(node, '0401', (types_str, node.attrname,))

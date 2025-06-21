@@ -1,45 +1,37 @@
 # scripts/checkers/static_checkers/type_error_checker.py
 import astroid
 import sys
-from typing import Optional, Tuple
+import traceback
 
-# 상위 디렉토리의 base_checkers와 utils에서 필요한 모듈 import
 from checkers.base_checkers import BaseAstroidChecker
-from utils import get_type_astroid, is_compatible_astroid
+
 
 class StaticTypeErrorChecker(BaseAstroidChecker):
     MSG_ID_PREFIX = 'E'
     NAME = 'static-type-error'
-    node_types = (astroid.BinOp,) # 이항 연산 노드를 검사
-    MSGS = {'0301': ("TypeError: Incompatible types for '%s' operation: %s and %s (Static)", 'invalid-types-op', '')}
+    node_types = (astroid.BinOp, astroid.UnaryOp, astroid.Call)
+    MSGS = {
+        '0201': ("TypeError: unsupported operand type(s) for %s: '%s' and '%s' (Static)", 'unsupported-operand-type', ''),
+        '0202': ("TypeError: object is not callable (Static)", 'not-callable', '')
+    }
 
-    def check(self, node: astroid.BinOp):
-        # --- 디버깅 로그 1: 체커 실행 확인 ---
-        print(f"DEBUG: Running {self.NAME} on node: {node.as_string()}", file=sys.stderr)
-        
+    def check(self, node):
         try:
-            # 왼쪽과 오른쪽 피연산자의 타입을 추론
-            left_type = get_type_astroid(node.left)
-            right_type = get_type_astroid(node.right)
-
-            # --- 디버깅 로그 2: 추론된 타입 확인 ---
-            print(f"  [TypeErrorChecker-DEBUG] Op: '{node.op}', Left: '{node.left.as_string()}' (type: {left_type}), Right: '{node.right.as_string()}' (type: {right_type})", file=sys.stderr)
-
-            # 두 피연산자의 타입을 모두 추론했을 경우에만 호환성 검사
-            if left_type and right_type:
-                compatible = is_compatible_astroid(left_type, right_type, node.op)
-                # --- 디버깅 로그 3: 호환성 검사 결과 확인 ---
-                print(f"  [TypeErrorChecker-DEBUG] Compatibility check for ({left_type}, {right_type}, '{node.op}') -> {compatible}", file=sys.stderr)
-
-                if not compatible:
-                    # --- 디버깅 로그 4: 오류 탐지 확인 ---
-                    print(f"DEBUG: {self.NAME} FOUND an error for '{node.op}'", file=sys.stderr)
-                    self.add_message(node, '0301', (node.op, left_type, right_type))
-        
-        except astroid.InferenceError:
-            # 타입 추론 실패는 자주 발생할 수 있으므로 조용히 넘어감
-            # print(f"DEBUG: InferenceError in {self.NAME} for {node.as_string()}", file=sys.stderr)
-            pass
+            if isinstance(node, astroid.BinOp):
+                left_type = self.get_type(node.left)
+                right_type = self.get_type(node.right)
+                op = node.op
+                if not self.is_compatible(left_type, right_type, op):
+                    self.add_message(node, '0201', (op, left_type, right_type))
+            elif isinstance(node, astroid.UnaryOp):
+                operand_type = self.get_type(node.operand)
+                op = node.op
+                if not self.is_compatible(operand_type, None, op):
+                    self.add_message(node, '0201', (op, operand_type, ''))
+            elif isinstance(node, astroid.Call):
+                func_type = self.get_type(node.func)
+                if func_type not in ('function', 'builtin_function_or_method', 'method', 'type'):
+                    self.add_message(node, '0202', ())
         except Exception as e:
-            # 그 외 예상치 못한 오류는 로그로 남김
             print(f"ERROR in {self.NAME} for {repr(node)[:100]}...: {e}", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)

@@ -1,4 +1,4 @@
-# scripts/checkers/static_checkers/name_error_checker.py (The real final version)
+# scripts/checkers/static_checkers/name_error_checker.py
 import astroid
 import builtins
 import sys
@@ -24,10 +24,9 @@ class StaticNameErrorChecker(BaseAstroidChecker):
 
         try:
             # lookup을 시도하여 정의를 찾는다.
+            # lookup의 결과는 (스코프 리스트, 할당 노드 리스트) 형태의 튜플이다.
             definitions = node.lookup(node.name)
 
-            # --- 여기가 최종 해결책 ---
-            # lookup의 결과는 (스코프 리스트, 할당 노드 리스트) 형태의 튜플이다.
             # 두 번째 원소인 '할당 노드 리스트'가 비어있다면,
             # 이는 astroid가 builtins 같은 곳에서 이름을 찾았다고 착각했지만
             # 실제 정의를 찾지는 못한 경우이다.
@@ -37,10 +36,9 @@ class StaticNameErrorChecker(BaseAstroidChecker):
                 raise astroid.NotFoundError
 
         except astroid.NotFoundError:
-            # 정의를 찾지 못했거나, 찾았지만 유효하지 않은 경우
-            print(f"DEBUG: {self.NAME} FOUND a REAL error for '{node.name}' (NotFoundError or invalid definition)", file=sys.stderr)
+            # 정의를 찾지 못했거나, 찾았지만 유효하지 않은 경우에만 오류를 보고한다.
             self.add_message(node, '0102', (node.name,))
-        except Exception as e:
-            # lookup 과정에서 다른 예외가 발생한 경우
-            print(f"ERROR during lookup for '{node.name}': {e}", file=sys.stderr)
-            traceback.print_exc(file=sys.stderr)
+        except Exception:
+            # lookup 과정에서 발생할 수 있는 다른 모든 예외는 무시한다.
+            # (예: 복잡한 코드 구조로 인한 InferenceError 등)
+            pass
