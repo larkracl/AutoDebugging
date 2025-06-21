@@ -24,6 +24,12 @@
         "title": "Find Runtime Errors: Run Dynamic Analysis"
       }
     ],
+     "languages": [
+      {
+        "id": "python",
+        "configuration": "./language-configuration.json"
+      }
+    ],
     "configuration": {
       "title": "FindRuntimeErr",
       "properties": {
@@ -56,8 +62,16 @@
             "type": "string"
           }
         }
+        
+      },
+      "inlayHintProvider": [
+      {
+        "language": "python"
       }
+    ]
     }
+    
+    
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",

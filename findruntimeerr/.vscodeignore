@@ -10,5 +10,7 @@ vsc-extension-quickstart.md
 **/*.ts
 **/.vscode-test.*
 secret.properties
-*.pyc
-__pycache__/
+testFixture/
+findruntimeerr/out/*.js.map
+findruntimeerr/out/*.js
+findruntimeerr/scripts/__pycache__/*.*.pyc

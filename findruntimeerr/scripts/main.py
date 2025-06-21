@@ -1,55 +1,60 @@
-# main.py
+# scripts/main.py
 import sys
 import json
 import os
 import traceback
 
-# 현재 스크립트 디렉토리를 sys.path에 추가
 script_dir = os.path.dirname(os.path.abspath(__file__))
 if script_dir not in sys.path:
     sys.path.insert(0, script_dir)
 
-# core 모듈 import 시도 및 오류 처리
 try:
-    # parso 기반으로 수정된 core.py를 import
     from core import analyze_code
 except ImportError as e:
-    error_output = {"errors": [{"message": f"ImportError: {e}. Check sys.path and module locations.", "line": 1, "column": 1, "errorType": "ImportError"}], "call_graph": None}
-    print(json.dumps(error_output))
-    print(f"FATAL: ImportError in main.py: {e}", file=sys.stderr)
-    traceback.print_exc(file=sys.stderr)
+    tb_str = traceback.format_exc()
+    error_output = {"errors": [{"message": f"ImportError: {e}.\n{tb_str}", "line": 1, "column": 0, "errorType": "ImportError"}], "call_graph": None}
+    print(json.dumps(error_output, ensure_ascii=False), file=sys.stdout)
     sys.exit(1)
-except Exception as e: # 다른 종류의 import 에러
-    error_output = {"errors": [{"message": f"Unexpected Import Error: {e}.", "line": 1, "column": 1, "errorType": "ImportError"}], "call_graph": None}
-    print(json.dumps(error_output))
-    print(f"FATAL: Unexpected Import Error in main.py: {e}", file=sys.stderr)
-    traceback.print_exc(file=sys.stderr)
+except Exception as e:
+    tb_str = traceback.format_exc()
+    error_output = {"errors": [{"message": f"Unexpected Import Error: {e}.\n{tb_str}", "line": 1, "column": 0, "errorType": "ImportError"}], "call_graph": None}
+    print(json.dumps(error_output, ensure_ascii=False), file=sys.stdout)
     sys.exit(1)
 
 def main():
+    """스크립트 메인 실행 함수."""
+    analysis_result = {"errors": [], "call_graph": None}
     try:
         code = sys.stdin.read()
-        mode = sys.argv[1] if len(sys.argv) > 1 else 'realtime'
-
-        # 동적 분석은 별도 처리
-        if mode == 'dynamic':
-            print(json.dumps({"errors": [{"message": "Dynamic analysis not implemented", "line": 1, "column": 1, "errorType": "NotImplementedError"}], "call_graph": None}))
-            return
+        mode = sys.argv[1].lower() if len(sys.argv) > 1 else 'realtime'
+        base_dir = sys.argv[2] if len(sys.argv) > 2 else None
+        
+        if mode not in ('realtime', 'static'):
+             mode = 'realtime'
 
         try:
-            # parso 기반 analyze_code 호출
-            analysis_result = analyze_code(code, mode=mode)
+            analysis_result = analyze_code(code, mode=mode, base_dir=base_dir)
+            if not isinstance(analysis_result, dict) or 'errors' not in analysis_result or 'call_graph' not in analysis_result:
+                 raise TypeError(f"analyze_code returned unexpected type: {type(analysis_result)}")
         except Exception as e:
-            print(f"Critical error during analyze_code call: {e}", file=sys.stderr)
-            traceback.print_exc(file=sys.stderr)
-            analysis_result = {"errors": [{"message": f"Critical error during analysis: {e}", "line": 1, "column": 1, "errorType": "CoreAnalysisError"}], "call_graph": None}
+            tb_str = traceback.format_exc()
+            analysis_result = {
+                "errors": [{"message": f"Critical error during core analysis: {e}\n{tb_str}", "line": 1, "column": 0, "errorType": "CoreAnalysisCrash"}],
+                "call_graph": None
+            }
 
-        print(json.dumps(analysis_result))
+        try:
+            json_output = json.dumps(analysis_result, ensure_ascii=False, indent=None)
+            print(json_output, file=sys.stdout)
+        except Exception as e:
+             tb_str = traceback.format_exc()
+             fallback_error = {"errors": [{"message": f"Failed to serialize result: {e}", "line": 1, "column": 0, "errorType": "JSONSerializationError"}], "call_graph": None}
+             print(json.dumps(fallback_error, ensure_ascii=False), file=sys.stdout)
 
     except Exception as e:
-        print(f"FATAL error in main function: {e}", file=sys.stderr)
-        traceback.print_exc(file=sys.stderr)
-        print(json.dumps({"errors": [{"message": f"Fatal error in main: {e}", "line": 1, "column": 1, "errorType": "FatalMainError"}], "call_graph": None}))
+        tb_str = traceback.format_exc()
+        fatal_error_output = {"errors": [{"message": f"Fatal error in script execution: {e}\n{tb_str}", "line": 1, "column": 0, "errorType": "FatalMainError"}], "call_graph": None}
+        print(json.dumps(fatal_error_output, ensure_ascii=False), file=sys.stdout)
         sys.exit(1)
 
 if __name__ == '__main__':

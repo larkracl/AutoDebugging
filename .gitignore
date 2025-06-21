@@ -1,12 +1,11 @@
 
 .DS_Store
-findruntimeerr/.venv/bin/Activate.ps1
-findruntimeerr/secret.properties
-*.pyc
-__pycache__/
-/findruntimeerr/scripts/__pycache__/*
+findruntimeerr/.venv/
 secret.properties
-*.pyc
+testFixture/
 __pycache__/
-testFixture/*
-
+findruntimeerr/out/*.js.map
+findruntimeerr/out/*.js
+findruntimeerr/scripts/__pycache__/*.*.pyc
+*.pyc
+*.pyc

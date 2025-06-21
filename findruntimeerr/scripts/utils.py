@@ -1,207 +1,295 @@
-# scripts/utils.py
-import sys
+# utils.py (get_type_astroid 개선)
+import astroid
 import parso
-# parso 노드 타입 import
-from parso.tree import Node, Leaf, BaseNode # BaseNode는 Node와 Leaf의 공통 부모
-from parso.python import tree as parso_tree # 구체적인 타입들 (Function, Class 등)
-from typing import Optional, Set, Union, List, Dict, Any
+from parso.python import tree as pt
+import sys
+from typing import Optional, Set, Union, List, Dict, Any, cast
+import traceback
+import importlib.util
 
-# --- 타입 추론 함수 (매우 간소화됨) ---
-def get_type(node: BaseNode) -> Optional[str]: # BaseNode 사용
-    """parso 노드의 타입을 간단하게 추론합니다."""
+# symbol_table.py에서 클래스 import
+from symbol_table import Symbol, Scope, SymbolType
+
+# 타입 정의
+AstroidScopeNode = Union[astroid.Module, astroid.FunctionDef, astroid.Lambda, astroid.ClassDef, astroid.GeneratorExp, astroid.ListComp, astroid.SetComp, astroid.DictComp]
+ParsoScopeNode = Union[pt.Module, pt.Function, pt.Class, pt.Lambda]
+# --- Parso 기반 함수 (스코프 채우기용) ---
+
+def _add_parso_target_names_to_scope(target_node: parso.tree.BaseNode, scope: Scope, symbol_type: SymbolType = SymbolType.VARIABLE):
+    """Helper: Parso 할당/정의 대상 노드에서 변수 이름을 추출하여 주어진 스코프에 Symbol로 정의합니다."""
+    node_type = target_node.type
+    # 파라미터 노드(param) 자체를 처리
+    if node_type == 'param':
+        # param 노드의 첫 번째 자식(보통 name)에 대해 재귀 호출
+        if hasattr(target_node, 'children') and len(target_node.children) > 0:
+             _add_parso_target_names_to_scope(target_node.children[0], scope, symbol_type)
+        return
+
+    # 실제 이름(Leaf)을 찾았을 때
+    if node_type == 'name':
+        if isinstance(target_node, parso.tree.Leaf):
+             scope.define(Symbol(target_node.value, symbol_type, target_node))
+    # 튜플/리스트 언패킹 처리
+    elif node_type in ('testlist_star_expr', 'exprlist', 'testlist', 'atom', 'tfpdef') and hasattr(target_node, 'children'):
+        for child in target_node.children:
+            # 재귀적으로 내부의 이름들을 찾아 스코프에 추가
+            _add_parso_target_names_to_scope(child, scope, symbol_type)
+
+
+def _populate_scope_from_node_recursive(node: parso.tree.BaseNode, current_scope: Scope):
+    """
+    주어진 Parso 노드와 그 하위를 재귀적으로 탐색하며 정의를 찾아 현재 스코프에 추가합니다.
+    새로운 스코프(함수/클래스)를 만나면 재귀를 중단합니다.
+    """
+    node_type = node.type
+
+    # 1. 새로운 스코프(함수/클래스) 정의 - 현재 스코프에 이름만 정의하고, 내부는 탐색하지 않음
+    if node_type in ('funcdef', 'classdef'):
+        name_node = node.children[1]
+        if name_node.type == 'name' and isinstance(name_node, parso.tree.Leaf):
+            symbol_type = SymbolType.FUNCTION if node_type == 'funcdef' else SymbolType.CLASS
+            current_scope.define(Symbol(name_node.value, symbol_type, name_node))
+        # 새로운 스코프가 시작되므로, 이 노드의 자식들은 여기서 더 이상 탐색하지 않음.
+        # 스코프 트리를 만드는 Linter의 _build_and_visit_parso에서 처리할 것임.
+        return # *** 재귀 중단 ***
+
+    # 2. 다른 모든 정의 구문 처리
+    # Import 문
+    if node_type == 'simple_stmt' and len(node.children) > 0 and node.children[0].type in ('import_name', 'import_from'):
+        import_stmt = node.children[0]
+        try:
+            for name_leaf in import_stmt.get_defined_names():
+                if name_leaf.value != '*':
+                    symbol_type = SymbolType.MODULE if import_stmt.type == 'import_name' else SymbolType.IMPORTED_NAME
+                    current_scope.define(Symbol(name_leaf.value, symbol_type, name_leaf))
+        except Exception as e: print(f"Error parsing import names: {e}", file=sys.stderr)
+    # 일반/주석 할당문
+    elif node_type == 'simple_stmt' and len(node.children) > 0 and node.children[0].type == 'expr_stmt':
+        expr_stmt = node.children[0]
+        if len(expr_stmt.children) >= 2 and expr_stmt.children[1].type == 'operator':
+            if expr_stmt.children[1].value == '=' or expr_stmt.children[1].value == ':':
+                _add_parso_target_names_to_scope(expr_stmt.children[0], current_scope)
+    # For 루프 변수
+    elif node_type == 'for_stmt':
+        if len(node.children) >= 2: _add_parso_target_names_to_scope(node.children[1], current_scope)
+    # With ... as 변수
+    elif node_type == 'with_item':
+        for i, item_child in enumerate(node.children):
+            if isinstance(item_child, parso.tree.Leaf) and item_child.value == 'as':
+                if i + 1 < len(node.children): _add_parso_target_names_to_scope(node.children[i+1], current_scope)
+    # Except ... as 변수
+    elif node_type == 'except_clause':
+        as_found = False
+        for child in node.children:
+            if as_found and child.type == 'name':
+                if isinstance(child, parso.tree.Leaf): current_scope.define(Symbol(child.value, SymbolType.VARIABLE, child)); break
+            if isinstance(child, parso.tree.Leaf) and child.value == 'as': as_found = True
+            elif as_found: as_found = False
+    # Walrus 연산자
+    elif node_type == 'namedexpr_test':
+        if len(node.children) > 0 and node.children[0].type == 'name':
+            if isinstance(node.children[0], parso.tree.Leaf):
+                current_scope.define(Symbol(node.children[0].value, SymbolType.VARIABLE, node.children[0]))
+
+    # 3. 다른 모든 자식 노드는 재귀적으로 하위 탐색
+    if hasattr(node, 'children'):
+        for child in node.children:
+            _populate_scope_from_node_recursive(child, current_scope)
+
+
+def populate_scope_from_parso(scope: Scope):
+    """
+    주어진 Parso 스코프 노드를 분석하여 심볼 테이블(Scope 객체)을 채웁니다.
+    """
+    scope_node = scope.node
     try:
-        node_type = node.type # parso 노드 타입 (문자열)
+        # 1. 함수/람다 매개변수 먼저 수집
+        if isinstance(scope_node, (pt.Function, pt.Lambda)):
+            for param in scope_node.get_params():
+                _add_parso_target_names_to_scope(param, scope, SymbolType.PARAMETER)
 
-        if node_type == 'number':
-            val_str = node.value
-            if '.' in val_str or 'e' in val_str.lower(): return 'float'
-            if 'j' in val_str.lower(): return 'complex' # 복소수 추가
-            return 'int'
-        elif node_type == 'string':
-            # 'rb' 와 같은 prefix 확인하여 bytes 구분 시도
-            code = node.get_code(include_prefix=True).lower()
-            if code.startswith('b') or code.startswith('rb'): return 'bytes'
-            if code.startswith('u'): return 'str' # 유니코드 명시
-            # TODO: f-string, raw string 등 더 정확한 구분 필요
-            return 'str' # 기본값 str
-        elif node_type == 'keyword':
-            if node.value in ('True', 'False'): return 'bool'
-            if node.value == 'None': return 'NoneType'
-        elif node_type == 'name':
-             return 'variable' # 또는 node.value (타입은 아님)
-        elif node_type in ('funcdef', 'lambdef'):
-             return 'function'
-        elif node_type == 'classdef':
-             class_name_node = node.children[1] # 'class' 키워드 다음 이름
-             if class_name_node.type == 'name': return class_name_node.value
-             return 'class'
-        elif node_type == 'atom_expr': # 리스트, 튜플, 딕셔너리, 셋 리터럴
-             if node.children:
-                 first_child = node.children[0]
-                 if first_child.type == 'atom':
-                      op_char = first_child.children[0].value
-                      if op_char == '[': return 'list'
-                      if op_char == '(': return 'tuple'
-                      if op_char == '{':
-                           if len(first_child.children) > 2 and first_child.children[1].type == 'dictorsetmaker':
-                               if ':' in [c.value for c in first_child.children[1].children if c.type=='operator']: return 'dict'
-                               else: return 'set'
-                           elif len(first_child.children) == 2: return 'dict' # {}
-                           else: return 'set' # PEP 274: 빈 셋 리터럴 없음, set() 사용
-        # TODO: 더 많은 타입 추론 (예: 함수 호출 결과, 인스턴스 생성) - parso로는 매우 제한적
+        # 2. 현재 스코프의 본문(suite)에 있는 직계 자식 노드들 순회
+        nodes_to_process = []
+        if isinstance(scope_node, pt.Module):
+            nodes_to_process = scope_node.children
+        elif hasattr(scope_node, 'get_suite'): # Function, Class
+             suite = scope_node.get_suite()
+             if suite: nodes_to_process = suite.children
+
+        for node in nodes_to_process:
+            _populate_scope_from_node_recursive(node, scope)
 
     except Exception as e:
-        print(f"Unexpected error in get_type for parso node {node!r}: {e}", file=sys.stderr)
-    return None
+         scope_repr = repr(scope_node); print(f"Error in populate_scope_from_parso for {scope_repr[:100]}...: {e}", file=sys.stderr); traceback.print_exc(file=sys.stderr)
 
-# --- 타입 호환성 검사 (개선됨) ---
-def is_compatible(type1: Optional[str], type2: Optional[str], op: str) -> bool:
-    """두 타입이 주어진 연산에 대해 호환되는지 확인합니다."""
-    # 추론 불가/불확실 타입은 일단 호환 간주
-    if type1 is None or type2 is None or \
-       type1.lower() == 'unknown' or type2.lower() == 'unknown' or \
-       type1 in ('CallResult', 'variable', 'Name') or type2 in ('CallResult', 'variable', 'Name'):
+def check_module_exists(module_name: str) -> bool:
+    if not module_name or module_name.startswith('.'): return True
+    try:
+        top_level_module = module_name.split('.')[0]
+        return importlib.util.find_spec(top_level_module) is not None
+    except Exception:
         return True
 
-    if type1 == type2: return True
+# --- Astroid 기반 함수 ---
+def get_type_astroid(node: astroid.NodeNG) -> Optional[str]:
+    """
+    astroid 노드의 타입을 추론하여 문자열로 반환합니다.
+    항상 문자열을 반환하도록 보장하여 호환성을 높입니다.
+    """
+    try:
+        inferred_list = list(node.infer(context=None))
 
+        if not inferred_list or inferred_list[0] is astroid.Uninferable:
+            # 추론 불가 시, 노드 타입 자체로 간단히 추정
+            if isinstance(node, astroid.Const): return type(node.value).__name__
+            elif isinstance(node, astroid.List): return 'list'
+            elif isinstance(node, astroid.Tuple): return 'tuple'
+            elif isinstance(node, astroid.Dict): return 'dict'
+            elif isinstance(node, astroid.Set): return 'set'
+            return None # 그 외에는 알 수 없음
+
+        primary_type = inferred_list[0]
+
+        # *** 수정된 부분: 타입 이름을 문자열로 얻는 로직 강화 ***
+        # 1. .pytype() 메서드가 있으면 가장 정확한 타입 문자열 (e.g., 'builtins.int')
+        if hasattr(primary_type, 'pytype'):
+            try:
+                return primary_type.pytype()
+            except Exception: # .pytype() 호출이 실패하는 경우도 있음
+                pass
+        
+        # 2. qname (qualified name) 이 있으면 사용 (e.g., 'my_module.MyClass')
+        if hasattr(primary_type, 'qname') and isinstance(primary_type.qname, str):
+            return primary_type.qname
+        
+        # 3. name 속성이 있으면 사용
+        if hasattr(primary_type, 'name') and isinstance(primary_type.name, str):
+            return primary_type.name
+
+        # 4. 상수로 추론된 경우
+        if isinstance(primary_type, astroid.Const):
+            return type(primary_type.value).__name__
+            
+        # 5. 최후의 수단: 객체의 클래스 이름
+        return primary_type.__class__.__name__
+
+    except astroid.InferenceError: return None
+    except Exception as e:
+        node_repr = repr(node)
+        print(f"Error in get_type_astroid for {node_repr[:100]}...: {e}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
+        return None
+
+# utils.py 의 is_compatible_astroid 함수
+def is_compatible_astroid(type1_fq: Optional[str], type2_fq: Optional[str], op: str) -> bool:
+    """두 타입(정규화된 이름 포함 가능)이 주어진 연산자에 대해 호환되는지 확인합니다."""
+    # 타입 정보가 없으면, 런타임에 결정될 수 있으므로 일단 호환 간주 (False Negative 방지)
+    if type1_fq is None or type2_fq is None:
+        return True
+
+    # 'builtins.int' -> 'int' 와 같이 기본 타입 이름만 추출하여 소문자로 비교
+    type1 = type1_fq.split('.')[-1].lower()
+    type2 = type2_fq.split('.')[-1].lower()
+
+    # 타입 그룹 정의
     numeric_types = ("int", "float", "complex", "bool")
-    sequence_types = ("str", "list", "tuple", "bytes", "bytearray")
+    sequence_types = ("str", "list", "tuple", "bytes", "bytearray", "range")
     set_types = ("set", "frozenset")
     mapping_types = ("dict",)
 
-    # 숫자 타입 간 연산
+    # 1. 숫자 타입끼리의 연산
     if type1 in numeric_types and type2 in numeric_types:
-        if op in ("+", "-", "*", "/", "//", "%", "**", "<", "<=", ">", ">=", "==", "!="): return True
-        if type1 in ("int", "bool") and type2 in ("int", "bool") and op in ("&", "|", "^", "<<", ">>"): return True
+        # 대부분의 산술 및 비교 연산은 호환됨
+        if op in ("+", "-", "*", "/", "//", "%", "**", "<", "<=", ">", ">=", "==", "!="):
+            # 단, 복소수는 순서 비교(<, <=, >, >=)가 불가능
+            if "complex" in (type1, type2) and op in ("<", "<=", ">", ">="):
+                return False
+            return True
+        # 비트 연산은 정수와 bool 타입 간에만 호환
+        if type1 in ("int", "bool") and type2 in ("int", "bool") and op in ("&", "|", "^", "<<", ">>", "~"):
+             return True
 
-    # 시퀀스 타입 연산
-    if type1 in sequence_types and type2 in sequence_types and type1 == type2 and op == '+': return True
-    if type1 in sequence_types and type2 == 'int' and op == '*': return True
-    if type1 == 'int' and type2 in sequence_types and op == '*': return True
-    if type1 == "str" and type2 == "str" and op in ("==", "!=", "<", "<=", ">", ">="): return True
+    # 2. 시퀀스 타입끼리의 연산
+    if type1 in sequence_types and type2 in sequence_types:
+        # 같은 타입의 시퀀스만 덧셈(연결) 가능
+        if type1 == type2 and op == '+':
+            return True
+        # 일부 시퀀스 타입은 순서 비교 가능 (문자열, 튜플, 리스트 등)
+        if type1 in ("str", "tuple", "list", "bytes", "bytearray") and type1 == type2 and op in ("<", "<=", ">", ">="):
+             return True
+        # 모든 시퀀스는 동등 비교 가능
+        if op in ("==", "!="):
+             return True
 
-    # 문자열 포매팅
-    if type1 == "str" and op == '%': return True
+    # 3. 시퀀스와 정수의 곱셈 (반복) - 유일하게 다른 타입 간의 유효한 산술 연산
+    if op == '*':
+        if (type1 in sequence_types and type2 == 'int') or \
+           (type1 == 'int' and type2 in sequence_types):
+            return True
 
-    # Set 연산
+    # *** 4. 숫자와 다른 타입의 산술 연산은 비호환 (핵심 수정) ***
+    is_type1_numeric = type1 in numeric_types
+    is_type2_numeric = type2 in numeric_types
+    # 한쪽만 숫자이고 다른 쪽은 숫자가 아닐 때 (위 3번의 곱셈 예외는 이미 통과됨)
+    if op in ('+', '-', '/', '//', '%', '**') and (is_type1_numeric != is_type2_numeric):
+         return False # 예: int + str, str / int 등
+
+    # 5. 문자열 포매팅 연산자 (%)
+    if op == '%' and type1 == "str":
+        # 오른쪽 피연산자 타입은 매우 다양하므로 일단 호환되는 것으로 간주
+        return True
+
+    # 6. 집합(Set) 타입 연산
     if type1 in set_types and type2 in set_types:
-         if op in ("|", "&", "-", "^", "<=", "<", ">=", ">", "==", "!="): return True
+         if op in ("|", "&", "-", "^", "<=", "<", ">=", ">", "==", "!="):
+             return True
 
-    # 멤버십 테스트
+    # 7. 멤버십 테스트 ('in', 'not in')
     if op in ("in", "not in"):
-        if type2 in sequence_types or type2 in set_types or type2 in mapping_types: return True
+        # 오른쪽 피연산자가 반복 가능한(iterable) 컨테이너 타입이면 호환
+        if type2 in sequence_types or type2 in set_types or type2 in mapping_types:
+            return True
 
-    # bool 연산 (and, or)
-    if op in ('and', 'or'): return True # 모든 타입 가능
+    # 8. 논리 연산 ('and', 'or') - 모든 타입 가능
+    if op in ('and', 'or'):
+        return True
 
-    # 단항 연산 (is_compatible 호출 전에 처리하는 것이 더 나을 수 있음)
-    if op in ('not', '+', '-', '~'): # type1만 사용됨
-         if op == 'not': return True # 대부분 타입 가능
-         if op in ('+', '-') and type1 in numeric_types: return True
-         if op == '~' and type1 == 'int': return True
+    # 9. 단항 연산 ('not', '+', '-', '~') - type1만 확인
+    if op == 'not': return True # 모든 타입에 적용 가능
+    if op in ('+', '-') and type1 in numeric_types: return True # 숫자 부호
+    # 비트 NOT (~)은 위 숫자 타입 규칙에서 이미 처리됨
 
+    # 10. 식별 연산자 ('is', 'is not') - 타입과 관계없이 항상 가능
+    if op in ('is', 'is not'):
+        return True
 
+    # 위 모든 규칙에 해당하지 않으면 호환되지 않는 것으로 간주
     return False
 
-# --- 정의된 변수 수집 (parso 스코프 노드 사용 - Union 타입 수정) ---
-def collect_defined_variables(scope_node: Union[parso_tree.Module, parso_tree.Function, parso_tree.Class, parso_tree.Lambda]) -> Set[str]:
-    """주어진 parso 스코프 내에서 정의된 이름을 수집합니다."""
+def collect_defined_variables_astroid(scope_node: AstroidScopeNode) -> Set[str]:
+    # (이전 답변과 동일)
     defined_vars: Set[str] = set()
     try:
-        # 함수/람다 매개변수
-        if isinstance(scope_node, (parso_tree.Function, parso_tree.Lambda)):
-            for param in scope_node.get_params():
-                if isinstance(param.name, parso_tree.Name): # param.name 이 Name 객체인지 확인
-                    defined_vars.add(param.name.value)
-                # TODO: 복잡한 파라미터 (튜플 언패킹 등) 처리
-
-        # 클래스 내부: 메서드/클래스 변수
-        elif isinstance(scope_node, parso_tree.Class):
-             class_suite = scope_node.get_suite()
-             if class_suite:
-                 for node_in_class in class_suite.children:
-                      if node_in_class.type == 'funcdef':
-                           if len(node_in_class.children) > 1 and node_in_class.children[1].type == 'name':
-                                defined_vars.add(node_in_class.children[1].value)
-                      elif node_in_class.type == 'simple_stmt':
-                           assign_node = node_in_class.children[0]
-                           if assign_node.type == 'expr_stmt':
-                               target = assign_node.children[0]
-                               # 클래스 변수 할당 (단순 이름)
-                               if target.type == 'name': defined_vars.add(target.value)
-                               # TODO: AnnAssign, AugAssign 등 추가
-
-        # 스코프 본문 순회
-        nodes_to_check = []
-        if isinstance(scope_node, parso_tree.Module): nodes_to_check = scope_node.children
-        elif hasattr(scope_node, 'get_suite'): # Function, Class, Lambda
-             suite = scope_node.get_suite()
-             if suite: nodes_to_check = suite.children
-
-        for node in nodes_to_check:
-            # 할당문
-            if node.type == 'simple_stmt' and node.children[0].type == 'expr_stmt':
-                 stmt_children = node.children[0].children
-                 # A = B, A, B = C 등
-                 if len(stmt_children) > 1 and stmt_children[1].type == 'operator' and stmt_children[1].value == '=':
-                     target = stmt_children[0]
-                     _add_target_names_parso(target, defined_vars)
-                 # A : int = B (AnnAssign 유사 패턴)
-                 elif len(stmt_children) >= 3 and stmt_children[1].type == ':' and len(stmt_children) > 3 and stmt_children[3].type == 'operator' and stmt_children[3].value == '=':
-                     target = stmt_children[0]
-                     if target.type == 'name': defined_vars.add(target.value)
-                 # A += B (AugAssign 유사 패턴) - 이미 정의되어 있어야 함
-                 elif len(stmt_children) > 1 and stmt_children[1].type == 'augassign':
-                      target = stmt_children[0]
-                      if target.type == 'name': defined_vars.add(target.value)
-
-            # For 루프 변수
-            elif node.type == 'for_stmt':
-                 target_list = node.children[1] # exprlist
-                 _add_target_names_parso(target_list, defined_vars)
-            # Import 문
-            elif node.type == 'simple_stmt' and node.children[0].type == 'import_name':
-                 dotted_as_names = node.children[0].children[1]
-                 for name_node in dotted_as_names.children:
-                      if name_node.type == 'dotted_as_name':
-                           if len(name_node.children) == 3: defined_vars.add(name_node.children[2].value) # as name
-                           else: # a.b.c -> c만 추가 (선택적)
-                                last_name_leaf = name_node.children[0].get_last_leaf()
-                                if last_name_leaf.type == 'name': defined_vars.add(last_name_leaf.value)
-                      elif name_node.type == ',': continue
-            elif node.type == 'simple_stmt' and node.children[0].type == 'import_from':
-                 import_target = node.children[0].children[-1]
-                 if import_target.type == 'import_as_names':
-                      for name_node in import_target.children:
-                           if name_node.type == 'import_as_name':
-                                if len(name_node.children) == 3: defined_vars.add(name_node.children[2].value) # as name
-                                else: defined_vars.add(name_node.children[0].value) # original name
-                           elif name_node.type == ',': continue
-                 elif import_target.type == 'import_as_name':
-                     if len(import_target.children) == 3: defined_vars.add(import_target.children[2].value)
-                     else: defined_vars.add(import_target.children[0].value)
-            # 함수/클래스 정의
-            elif node.type in ('funcdef', 'classdef'):
-                 if len(node.children) > 1 and node.children[1].type == 'name':
-                     defined_vars.add(node.children[1].value)
-            # With 문 변수
-            elif node.type == 'with_stmt':
-                 for item in node.children:
-                      if item.type == 'with_item' and len(item.children) == 3 and item.children[1].value == 'as':
-                           _add_target_names_parso(item.children[2], defined_vars)
-
+       if isinstance(scope_node, (astroid.FunctionDef, astroid.Lambda)): defined_vars.update(scope_node.argnames())
+       assign_targets = [t.name for an in scope_node.nodes_of_class((astroid.Assign, astroid.AugAssign, astroid.AnnAssign)) for t in an.targets if isinstance(t, astroid.AssignName)]
+       defined_vars.update(assign_targets)
+       unpacking_targets = [e.name for an in scope_node.nodes_of_class((astroid.Assign, astroid.AnnAssign)) for t in an.targets if isinstance(t, (astroid.Tuple, astroid.List)) for e in t.elts if isinstance(e, astroid.AssignName)]
+       defined_vars.update(unpacking_targets)
+       import_names = set()
+       for imp_node in scope_node.nodes_of_class((astroid.Import, astroid.ImportFrom)):
+           for name, alias in imp_node.names:
+               if name != '*': import_names.add(alias or name.split('.')[0] if isinstance(imp_node, astroid.Import) else alias or name)
+       defined_vars.update(import_names)
+       for_targets = [t.name for fn in scope_node.nodes_of_class(astroid.For) for t in [fn.target] if isinstance(t, astroid.AssignName)]
+       defined_vars.update(for_targets)
+       for_unpack_targets = [e.name for fn in scope_node.nodes_of_class(astroid.For) for t in [fn.target] if isinstance(t, (astroid.Tuple, astroid.List)) for e in t.elts if isinstance(e, astroid.AssignName)]
+       defined_vars.update(for_unpack_targets)
+       with_targets = [t.name for wn in scope_node.nodes_of_class(astroid.With) for _, ats in wn.items if ats for t in ([ats] if isinstance(ats, astroid.AssignName) else ats.elts if isinstance(ats, (astroid.Tuple, astroid.List)) else []) if isinstance(t, astroid.AssignName)]
+       defined_vars.update(with_targets)
+       def_names = [dn.name for dn in scope_node.nodes_of_class((astroid.FunctionDef, astroid.ClassDef)) if dn.parent is scope_node]
+       defined_vars.update(def_names)
+       except_names = [en.name.name for en in scope_node.nodes_of_class(astroid.ExceptHandler) if en.name and isinstance(en.name, astroid.AssignName)]
+       defined_vars.update(except_names)
     except Exception as e:
-         print(f"Error collecting defined variables in scope {getattr(scope_node, 'name', scope_node.type)}: {e}", file=sys.stderr)
-
+        scope_name = getattr(scope_node, 'name', type(scope_node).__name__); print(f"Error collecting astroid vars in '{scope_name}': {e}", file=sys.stderr); traceback.print_exc(file=sys.stderr)
     return defined_vars
-
-def _add_target_names_parso(target_node: BaseNode, defined_vars: Set[str]):
-    """parso 할당/루프 대상 노드에서 변수 이름을 추출합니다."""
-    if target_node.type == 'name':
-         defined_vars.add(target_node.value)
-    elif target_node.type in ('testlist_star_expr', 'exprlist', 'testlist', 'arglist', 'atom') : # atom 추가 (괄호 있는 튜플)
-         if hasattr(target_node, 'children'):
-             for child in target_node.children:
-                  if child.type != ',' and child.value not in '()[]{}': # 구분자 제외
-                       _add_target_names_parso(child, defined_vars)
