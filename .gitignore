@@ -8,3 +8,4 @@ findruntimeerr/out/*.js.map
 findruntimeerr/out/*.js
 findruntimeerr/scripts/__pycache__/*.*.pyc
 *.pyc
+*.pyc
