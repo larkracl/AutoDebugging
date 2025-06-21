@@ -22,26 +22,9 @@ interface ErrorInfo {
   end_column?: number;
   errorType: string;
 }
-interface CallGraphNode {
-  id: string;
-  type?: string;
-  lineno?: number;
-  [key: string]: any;
-}
-interface CallGraphLink {
-  source: string;
-  target: string;
-  type?: string;
-  call_sites?: number[];
-  [key: string]: any;
-}
 interface CallGraphData {
-  nodes: CallGraphNode[];
-  links: CallGraphLink[];
-  directed?: boolean;
-  multigraph?: boolean;
-  graph?: any;
-  [key: string]: any;
+  nodes: { id: string; [key: string]: any }[];
+  links: { source: string; target: string; [key: string]: any }[];
 }
 interface AnalysisResult {
   errors: ErrorInfo[];
@@ -51,10 +34,8 @@ interface AnalysisResult {
 // --- 전역 변수 ---
 let outputChannel: vscode.OutputChannel;
 let diagnosticCollection: vscode.DiagnosticCollection;
-let errorDecorationType: vscode.TextEditorDecorationType;
-let lastCallGraph: CallGraphData | null = null;
-let checkedPackages = false;
 let lastUsedPythonExecutable: string | null = null;
+let checkedPackages = false;
 let debounceTimeout: NodeJS.Timeout | null = null;
 const inlayHintsCache = new Map<string, vscode.InlayHint[]>();
 
@@ -62,15 +43,9 @@ const inlayHintsCache = new Map<string, vscode.InlayHint[]>();
 export function activate(context: vscode.ExtensionContext) {
   try {
     outputChannel = vscode.window.createOutputChannel("FindRuntimeErr");
-    outputChannel.appendLine("Activating FindRuntimeErr extension.");
     diagnosticCollection =
       vscode.languages.createDiagnosticCollection("findRuntimeErr");
     context.subscriptions.push(diagnosticCollection);
-
-    errorDecorationType = vscode.window.createTextEditorDecorationType({
-      textDecoration: "underline wavy green",
-    });
-    context.subscriptions.push(errorDecorationType);
 
     const debounceDelay = 500;
 
@@ -102,7 +77,7 @@ export function activate(context: vscode.ExtensionContext) {
         ),
         ignoredErrorTypes: config
           .get<string[]>("ignoredErrorTypes", [])
-          .map((type) => type.toLowerCase()),
+          .map((t) => t.toLowerCase()),
         minAnalysisLength: config.get<number>("minAnalysisLength", 10),
         pythonPath: config.get<string | null>("pythonPath", null),
         enableInlayHints: config.get<boolean>("enableInlayHints", true),
@@ -113,22 +88,7 @@ export function activate(context: vscode.ExtensionContext) {
       resource?: vscode.Uri
     ): Promise<string> {
       const config = getConfiguration();
-      outputChannel.appendLine(
-        "[getSelectedPythonPath] Determining Python executable path..."
-      );
-      if (config.pythonPath) {
-        try {
-          const stats = await fs.promises.stat(config.pythonPath);
-          if (stats.isFile() || stats.isSymbolicLink()) {
-            outputChannel.appendLine(
-              `[getSelectedPythonPath] Using pythonPath from settings: ${config.pythonPath}`
-            );
-            return config.pythonPath;
-          }
-        } catch (e: any) {
-          // Ignore error and try next method
-        }
-      }
+      if (config.pythonPath) return config.pythonPath;
       try {
         const pythonExtension =
           vscode.extensions.getExtension("ms-python.python");
@@ -143,35 +103,22 @@ export function activate(context: vscode.ExtensionContext) {
             const environment = await api.environments.resolveEnvironment(
               envPath
             );
-            if (environment?.path) {
-              outputChannel.appendLine(
-                `[getSelectedPythonPath] Using Python path from Python extension API (environments): ${environment.path}`
-              );
-              return environment.path;
-            }
+            if (environment?.path) return environment.path;
           }
         }
-      } catch (err: any) {
-        // Ignore error and try next method
+      } catch (err) {
+        /* Fallback */
       }
       const defaultPath = vscode.workspace
         .getConfiguration("python", resource)
         .get<string>("defaultInterpreterPath");
-      if (defaultPath) {
-        outputChannel.appendLine(
-          `[getSelectedPythonPath] Using python.defaultInterpreterPath: ${defaultPath}`
-        );
-        return defaultPath;
-      }
+      if (defaultPath) return defaultPath;
       for (const cmd of ["python3", "python"]) {
         try {
           execSync(`${cmd} --version`, { stdio: "ignore" });
-          outputChannel.appendLine(
-            `[getSelectedPythonPath] Using '${cmd}' found in PATH.`
-          );
           return cmd;
         } catch {
-          /* next */
+          /* Fallback */
         }
       }
       throw new Error("Could not find a valid Python interpreter.");
@@ -179,19 +126,18 @@ export function activate(context: vscode.ExtensionContext) {
 
     function checkPythonPackages(pythonExecutable: string): {
       missing: string[];
-      error?: string;
     } {
       const requiredPackages = ["parso", "astroid", "networkx"];
-      const missingPackages: string[] = [];
-      for (const pkg of requiredPackages) {
+      const missingPackages = requiredPackages.filter((pkg) => {
         try {
           execSync(`"${pythonExecutable}" -m pip show "${pkg}"`, {
             stdio: "pipe",
           });
-        } catch (error) {
-          missingPackages.push(pkg);
+          return false;
+        } catch {
+          return true;
         }
-      }
+      });
       return { missing: missingPackages };
     }
 
@@ -204,36 +150,33 @@ export function activate(context: vscode.ExtensionContext) {
       try {
         pythonExecutable = await getSelectedPythonPath(documentUri);
       } catch (e: any) {
-        return Promise.resolve({
+        return {
           errors: [
             {
-              message: `Failed to determine Python path: ${e.message}`,
+              message: `Python path error: ${e.message}`,
               line: 1,
               column: 0,
               errorType: "PythonPathError",
             },
           ],
           call_graph: null,
-        });
+        };
       }
-
       if (lastUsedPythonExecutable !== pythonExecutable) {
         lastUsedPythonExecutable = pythonExecutable;
         checkedPackages = false;
       }
-
       return new Promise((resolve) => {
         try {
           if (!checkedPackages) {
             const checkResult = checkPythonPackages(pythonExecutable);
             if (checkResult.missing.length > 0) {
-              const errorMsg = `FindRuntimeErr requires: ${checkResult.missing.join(
-                ", "
-              )}. Please install them.`;
               resolve({
                 errors: [
                   {
-                    message: errorMsg,
+                    message: `Missing packages: ${checkResult.missing.join(
+                      ", "
+                    )}. Please install them.`,
                     line: 1,
                     column: 0,
                     errorType: "MissingDependencyError",
@@ -245,67 +188,36 @@ export function activate(context: vscode.ExtensionContext) {
             }
             checkedPackages = true;
           }
-
           const scriptPath = path.join(
             context.extensionPath,
             "scripts",
             "main.py"
           );
-          if (!fs.existsSync(scriptPath))
-            throw new Error(`Analysis script not found: ${scriptPath}`);
-
-          // --- 여기가 핵심 수정 ---
           const baseDir = documentUri
             ? path.dirname(documentUri.fsPath)
             : context.extensionPath;
           const args = [scriptPath, mode, baseDir];
-
           const spawnOptions: SpawnOptionsWithoutStdio = {
             cwd: path.dirname(scriptPath),
           };
-          outputChannel.appendLine(
-            `[runAnalysisProcess] Spawning: "${pythonExecutable}" "${args.join(
-              '" "'
-            )}"`
-          );
-
           const pythonProcess = spawn(pythonExecutable, args, spawnOptions);
 
           let stdoutData = "";
           let stderrData = "";
           pythonProcess.stdin.write(code, "utf-8");
           pythonProcess.stdin.end();
-
           pythonProcess.stdout.on("data", (data) => {
             stdoutData += data.toString("utf-8");
           });
           pythonProcess.stderr.on("data", (data) => {
-            const chunk = data.toString("utf-8");
-            stderrData += chunk;
-            chunk.split("\n").forEach((line: string) => {
-              if (line.trim()) outputChannel.appendLine(`[Py Stderr] ${line}`);
-            });
+            stderrData += data.toString("utf-8");
           });
-
           pythonProcess.on("close", (closeCode) => {
-            outputChannel.appendLine(
-              `[runAnalysisProcess] Python process exited with code: ${closeCode}`
-            );
-            if (stderrData.trim())
-              outputChannel.appendLine(
-                `[runAnalysisProcess] Full Stderr from Python:\n${stderrData}`
-              );
-
-            const trimmedStdout = stdoutData.trim();
-            outputChannel.appendLine(
-              `[runAnalysisProcess] Raw stdout before JSON.parse (Mode: ${mode}):\n${trimmedStdout}`
-            );
-
-            if (closeCode !== 0 && !trimmedStdout) {
+            if (closeCode !== 0 && !stdoutData.trim()) {
               resolve({
                 errors: [
                   {
-                    message: `Analysis script failed (Code: ${closeCode}). Stderr: ${stderrData.trim()}`,
+                    message: `Analysis failed (Code: ${closeCode}). Stderr: ${stderrData.trim()}`,
                     line: 1,
                     column: 0,
                     errorType: "AnalysisScriptError",
@@ -315,31 +227,18 @@ export function activate(context: vscode.ExtensionContext) {
               });
               return;
             }
-            if (!trimmedStdout) {
-              resolve({ errors: [], call_graph: null });
-              return;
-            }
-
             try {
-              const result: AnalysisResult = JSON.parse(trimmedStdout);
-              outputChannel.appendLine(
-                `[runAnalysisProcess] Parsed result.errors.length: ${
-                  result?.errors?.length ?? "undefined"
-                }`
-              );
+              const result: AnalysisResult = JSON.parse(stdoutData.trim());
               if (result && Array.isArray(result.errors)) {
                 resolve(result);
               } else {
                 throw new Error("Invalid analysis result format.");
               }
-            } catch (parseError: any) {
-              outputChannel.appendLine(
-                `[runAnalysisProcess] Error parsing analysis results: ${parseError.message}.`
-              );
+            } catch (e: any) {
               resolve({
                 errors: [
                   {
-                    message: `Error parsing analysis results: ${parseError.message}`,
+                    message: `Error parsing analysis result: ${e.message}`,
                     line: 1,
                     column: 0,
                     errorType: "JSONParseError",
@@ -349,15 +248,11 @@ export function activate(context: vscode.ExtensionContext) {
               });
             }
           });
-
           pythonProcess.on("error", (err) => {
-            outputChannel.appendLine(
-              `[runAnalysisProcess] Python process error: ${err.message}`
-            );
             resolve({
               errors: [
                 {
-                  message: `Failed to start analysis process: ${err.message}`,
+                  message: `Failed to start analysis: ${err.message}`,
                   line: 1,
                   column: 0,
                   errorType: "SpawnError",
@@ -367,13 +262,10 @@ export function activate(context: vscode.ExtensionContext) {
             });
           });
         } catch (e: any) {
-          outputChannel.appendLine(
-            `ERROR in runAnalysisProcess setup: ${e.message}\n${e.stack}`
-          );
           resolve({
             errors: [
               {
-                message: `Error setting up analysis process: ${e.message}`,
+                message: `Error setting up analysis: ${e.message}`,
                 line: 1,
                 column: 0,
                 errorType: "SetupError",
@@ -385,75 +277,18 @@ export function activate(context: vscode.ExtensionContext) {
       });
     }
 
-    async function runDynamicAnalysisProcess(
-      code: string,
-      documentUri?: vscode.Uri
-    ): Promise<AnalysisResult> {
-      // 이 함수는 현재 토픽과 무관하므로 기존 로직을 그대로 사용한다고 가정
-      return Promise.resolve({ errors: [], call_graph: null });
-    }
-
-    async function analyzeCodeRealtime(
-      document: vscode.TextEditor["document"]
-    ) {
-      try {
-        const code = document.getText();
-        const config = getConfiguration();
-        if (!config.enable || code.length < config.minAnalysisLength) {
-          clearPreviousAnalysis(document.uri);
-          return;
-        }
-        clearPreviousAnalysis(document.uri);
-        const analysisResult = await runAnalysisProcess(
-          code,
-          "realtime",
-          document.uri
-        );
-        lastCallGraph = analysisResult.call_graph;
-        handleAnalysisResult(document.uri, config, analysisResult, "realtime");
-      } catch (e: any) {
-        outputChannel.appendLine(
-          `ERROR in analyzeCodeRealtime: ${e.message}\n${e.stack}`
-        );
-      }
-    }
-
     function handleAnalysisResult(
       documentUri: vscode.Uri,
       config: ExtensionConfig,
-      result: AnalysisResult,
-      mode: "realtime" | "static" | "dynamic"
+      result: AnalysisResult
     ) {
       if (!result || !Array.isArray(result.errors)) return;
-
-      outputChannel.appendLine(
-        `[handleAnalysisResult] Received ${result.errors.length} errors (before filtering) for ${documentUri.fsPath} (Mode: ${mode}):`
-      );
-      result.errors.forEach((err, index) => {
-        outputChannel.appendLine(
-          `  [RawErr ${index + 1}] Type: ${err.errorType}, Line: ${
-            err.line
-          }, Msg: ${err.message.substring(0, 70)}...`
-        );
-      });
-
       const filteredErrors = result.errors.filter(
         (err) => !config.ignoredErrorTypes.includes(err.errorType.toLowerCase())
       );
-      outputChannel.appendLine(
-        `[handleAnalysisResult] ${filteredErrors.length} errors after 'ignoredErrorTypes' filtering.`
-      );
-
       const inlayHints = createInlayHints(filteredErrors, config);
       inlayHintsCache.set(documentUri.toString(), inlayHints);
-
       displayDiagnostics(documentUri, config, filteredErrors);
-
-      if (mode === "static" && result.call_graph) {
-        outputChannel.appendLine(
-          `[handleAnalysisResult] Call graph: ${result.call_graph.nodes.length} nodes, ${result.call_graph.links.length} links.`
-        );
-      }
     }
 
     const createRange = (err: ErrorInfo): vscode.Range => {
@@ -470,9 +305,8 @@ export function activate(context: vscode.ExtensionContext) {
     ): vscode.InlayHint[] {
       const hints: vscode.InlayHint[] = [];
       if (!config.enableInlayHints) return hints;
-
       for (const err of errors) {
-        const { severity } = getSeverityAndUnderline(err.errorType, config);
+        const { severity } = getSeverity(err.errorType);
         if (severity <= config.severityLevel) {
           let hintText: string | undefined;
           if (err.errorType === "W0701")
@@ -495,17 +329,14 @@ export function activate(context: vscode.ExtensionContext) {
       return hints;
     }
 
-    function getSeverityAndUnderline(
-      errorType: string,
-      config: ExtensionConfig
-    ): { severity: vscode.DiagnosticSeverity; underline: boolean } {
-      const lowerType = errorType.toLowerCase();
-      let severity: vscode.DiagnosticSeverity;
-      if (lowerType.startsWith("e")) severity = vscode.DiagnosticSeverity.Error;
-      else if (lowerType.startsWith("w"))
-        severity = vscode.DiagnosticSeverity.Warning;
-      else severity = vscode.DiagnosticSeverity.Information;
-      return { severity, underline: true };
+    function getSeverity(errorType: string): {
+      severity: vscode.DiagnosticSeverity;
+    } {
+      if (errorType.toUpperCase().startsWith("E"))
+        return { severity: vscode.DiagnosticSeverity.Error };
+      if (errorType.toUpperCase().startsWith("W"))
+        return { severity: vscode.DiagnosticSeverity.Warning };
+      return { severity: vscode.DiagnosticSeverity.Information };
     }
 
     function displayDiagnostics(
@@ -515,7 +346,7 @@ export function activate(context: vscode.ExtensionContext) {
     ) {
       const diagnostics: vscode.Diagnostic[] = [];
       errors.forEach((err) => {
-        const { severity } = getSeverityAndUnderline(err.errorType, config);
+        const { severity } = getSeverity(err.errorType);
         if (severity <= config.severityLevel) {
           const range = createRange(err);
           const diagnostic = new vscode.Diagnostic(
@@ -543,8 +374,7 @@ export function activate(context: vscode.ExtensionContext) {
           const diagnosticsAtPos = diagnosticCollection
             .get(document.uri)
             ?.filter((d) => d.range.contains(position));
-          if (!diagnosticsAtPos || diagnosticsAtPos.length === 0)
-            return undefined;
+          if (!diagnosticsAtPos?.length) return undefined;
           const hoverContent = new vscode.MarkdownString(
             diagnosticsAtPos
               .map((d) => `**[${d.code}]** ${d.message}`)
@@ -559,11 +389,8 @@ export function activate(context: vscode.ExtensionContext) {
     const inlayHintsProvider = vscode.languages.registerInlayHintsProvider(
       { language: "python" },
       {
-        provideInlayHints(
-          document: vscode.TextDocument
-        ): vscode.ProviderResult<vscode.InlayHint[]> {
-          return inlayHintsCache.get(document.uri.toString()) || [];
-        },
+        provideInlayHints: (doc) =>
+          inlayHintsCache.get(doc.uri.toString()) || [],
       }
     );
     context.subscriptions.push(inlayHintsProvider);
@@ -573,7 +400,18 @@ export function activate(context: vscode.ExtensionContext) {
         return;
       if (debounceTimeout) clearTimeout(debounceTimeout);
       debounceTimeout = setTimeout(() => {
-        analyzeCodeRealtime(document).catch(() => {});
+        const config = getConfiguration();
+        if (
+          !config.enable ||
+          document.getText().length < config.minAnalysisLength
+        ) {
+          clearPreviousAnalysis(document.uri);
+          return;
+        }
+        clearPreviousAnalysis(document.uri);
+        runAnalysisProcess(document.getText(), "realtime", document.uri)
+          .then((result) => handleAnalysisResult(document.uri, config, result))
+          .catch(() => {}); // Errors are handled inside runAnalysisProcess
       }, debounceDelay);
     };
 
@@ -631,13 +469,7 @@ export function activate(context: vscode.ExtensionContext) {
                   "static",
                   editor.document.uri
                 );
-                lastCallGraph = result.call_graph;
-                handleAnalysisResult(
-                  editor.document.uri,
-                  config,
-                  result,
-                  "static"
-                );
+                handleAnalysisResult(editor.document.uri, config, result);
                 vscode.window.showInformationMessage(
                   `정적 분석 완료. ${result.errors.length}개 이슈 발견.`
                 );
@@ -647,19 +479,10 @@ export function activate(context: vscode.ExtensionContext) {
         }
       )
     );
-    context.subscriptions.push(
-      vscode.commands.registerCommand(
-        "findRuntimeErr.runDynamicAnalysis",
-        async () => {
-          /* ... */
-        }
-      )
-    );
 
     if (vscode.window.activeTextEditor)
       triggerRealtimeAnalysis(vscode.window.activeTextEditor.document);
   } catch (e: any) {
-    console.error("FATAL Error during extension activation:", e);
     vscode.window.showErrorMessage(
       `FindRuntimeErr failed to activate: ${e.message}.`
     );
@@ -667,6 +490,5 @@ export function activate(context: vscode.ExtensionContext) {
 }
 
 export function deactivate() {
-  outputChannel?.dispose();
   if (debounceTimeout) clearTimeout(debounceTimeout);
 }

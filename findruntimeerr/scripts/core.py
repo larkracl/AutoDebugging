@@ -8,9 +8,9 @@ from typing import List, Dict, Any, Optional, Tuple, cast
 from networkx.readwrite import json_graph
 import traceback
 
+# Local imports from the same package
 from symbol_table import Scope
 from utils import populate_scope_from_parso, get_type_astroid
-
 from checkers import (
     RT_CHECKERS_CLASSES, 
     STATIC_CHECKERS_CLASSES,
@@ -20,6 +20,10 @@ from checkers import (
 )
 
 class Linter:
+    """
+    Python 코드의 정적 및 실시간 분석을 수행하는 메인 클래스.
+    Parso를 이용한 빠른 실시간 분석과 Astroid를 이용한 깊이 있는 정적 분석을 담당.
+    """
     def __init__(self, base_dir: Optional[str] = None):
         self.base_dir = base_dir
         self.parso_checkers: List[BaseParsoChecker] = []
@@ -31,8 +35,7 @@ class Linter:
         try:
             self.grammar = parso.load_grammar()
         except Exception:
-            # 에러 발생 시 조용히 실패 (오류 메시지는 상위에서 처리)
-            pass
+            pass  # Fail silently, error will be handled by the caller
         self._load_parso_checkers()
 
     def _load_parso_checkers(self):
@@ -128,15 +131,19 @@ class Linter:
                   except (astroid.InferenceError, StopIteration): pass
                   if caller_qname and called_qname: self.add_edge_to_graph(caller_qname, called_qname, lineno=node.fromlineno)
              elif isinstance(node, astroid.ClassDef): self.add_node_to_graph(node.qname(), type='class', lineno=node.fromlineno)
-         except Exception: pass
+         except Exception:
+             pass
 
          for checker in self.astroid_checkers:
              if not checker.node_types or isinstance(node, checker.node_types):
                  try:
                     checker.check(node)
-                 except Exception as e:
-                      error_msg = f"Error in astroid checker {checker.NAME} on node {node.as_string()}: \n{traceback.format_exc()}"
-                      self.add_astroid_message('InternalAstroidCheckerError', node, error_msg)
+                 except Exception:
+                    # 체커 내부에서 오류 발생 시 조용히 넘어감 (릴리즈 버전)
+                    # 디버깅이 필요하면 아래 주석 해제
+                    # error_msg = f"Error in astroid checker {checker.NAME} on node {node.as_string()}: \n{traceback.format_exc()}"
+                    # self.add_astroid_message('InternalAstroidCheckerError', node, error_msg)
+                    pass
 
          for child in node.get_children():
              self.visit_astroid_node(child)
@@ -191,7 +198,8 @@ def analyze_code(code: str, mode: str = 'realtime', base_dir: Optional[str] = No
             linter.analyze_astroid(astroid_tree)
             try:
                 if linter.call_graph.nodes: call_graph_data = json_graph.node_link_data(linter.call_graph)
-            except Exception as e: linter.add_message('GraphError', None, f"Failed to convert call graph: {e}")
+            except Exception as e: 
+                linter.add_message('GraphError', None, f"Failed to convert call graph: {e}")
         all_errors.extend(linter.errors)
     else:
         all_errors.append({'message': f"Unknown analysis mode: {mode}", 'line': 1, 'column': 0, 'errorType': 'ModeError'})
