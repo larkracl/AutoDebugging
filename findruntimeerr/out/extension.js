@@ -2,7 +2,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.activate = activate;
 exports.deactivate = deactivate;
-// src/extension.ts (필터링 로직 및 로그 강화)
+// src/extension.ts
 const vscode = require("vscode");
 const child_process_1 = require("child_process");
 const path = require("path");
@@ -15,6 +15,9 @@ let lastCallGraph = null;
 let checkedPackages = false;
 let lastUsedPythonExecutable = null;
 let debounceTimeout = null;
+// --- 인레이 힌트를 위한 새로운 전역 변수 및 이벤트 ---
+const inlayHintsCache = new Map();
+const onDidChangeInlayHints = new vscode.EventEmitter();
 // --- 확장 기능 활성화 함수 ---
 function activate(context) {
     try {
@@ -28,7 +31,7 @@ function activate(context) {
         });
         context.subscriptions.push(errorDecorationType);
         const debounceDelay = 500;
-        // --- 설정 가져오기 함수 ---
+        // --- 설정 가져오기 함수 (기존과 동일) ---
         function getConfiguration() {
             const config = vscode.workspace.getConfiguration("findRuntimeErr");
             const severityLevel = config.get("severityLevel", "error");
@@ -54,13 +57,14 @@ function activate(context) {
                 enableDynamicAnalysis: config.get("enableDynamicAnalysis", false),
                 ignoredErrorTypes: config
                     .get("ignoredErrorTypes", [])
-                    .map((type) => type.toLowerCase()), // 설정값을 소문자로 저장
+                    .map((type) => type.toLowerCase()),
                 minAnalysisLength: config.get("minAnalysisLength", 10),
                 pythonPath: config.get("pythonPath", null),
             };
         }
-        // --- Python 경로 결정 함수 ---
+        // --- Python 경로 결정 함수 (기존과 동일) ---
         async function getSelectedPythonPath(resource) {
+            // ... (이전 코드와 동일하므로 생략) ...
             const config = getConfiguration();
             outputChannel.appendLine("[getSelectedPythonPath] Determining Python executable path...");
             if (config.pythonPath) {
@@ -188,8 +192,9 @@ function activate(context) {
             outputChannel.appendLine("[getSelectedPythonPath] Could not find any valid Python interpreter.");
             throw new Error("Could not find a valid Python interpreter. Configure 'findRuntimeErr.pythonPath', 'python.defaultInterpreterPath', or ensure Python is in PATH.");
         }
-        // --- Python 패키지 검사 함수 ---
+        // --- Python 패키지 검사 함수 (기존과 동일) ---
         function checkPythonPackages(pythonExecutable) {
+            // ... (이전 코드와 동일하므로 생략) ...
             const requiredPackages = ["parso", "astroid", "networkx"];
             const missingPackages = [];
             let checkError;
@@ -223,8 +228,9 @@ function activate(context) {
             }
             return { missing: missingPackages, error: checkError };
         }
-        // --- 정적 분석 프로세스 실행 함수 ---
+        // --- 정적 분석 프로세스 실행 함수 (기존과 동일) ---
         async function runAnalysisProcess(code, mode, documentUri) {
+            // ... (이전 코드와 동일하므로 생략) ...
             let pythonExecutable;
             try {
                 pythonExecutable = await getSelectedPythonPath(documentUri);
@@ -481,8 +487,9 @@ function activate(context) {
                 }
             });
         }
-        // --- 동적 분석 프로세스 실행 함수 ---
+        // --- 동적 분석 프로세스 실행 함수 (기존과 동일) ---
         async function runDynamicAnalysisProcess(code, documentUri) {
+            // ... (이전 코드와 동일하므로 생략) ...
             outputChannel.appendLine(`[runDynamicAnalysisProcess] Starting dynamic analysis...`);
             let pythonExecutable;
             try {
@@ -628,8 +635,9 @@ function activate(context) {
                 });
             });
         }
-        // --- 실시간 분석 실행 함수 ---
+        // --- 실시간 분석 실행 함수 (기존과 동일) ---
         async function analyzeCodeRealtime(document) {
+            // ... (이전 코드와 동일하므로 생략) ...
             try {
                 const code = document.getText();
                 const documentUri = document.uri;
@@ -666,6 +674,7 @@ function activate(context) {
             }
         }
         // --- 결과 처리 및 표시 함수들 ---
+        // **** handleAnalysisResult 함수 수정: 인레이 힌트 생성 로직 추가 ****
         function handleAnalysisResult(documentUri, config, result, mode) {
             if (!result || !Array.isArray(result.errors)) {
                 outputChannel.appendLine(`[handleAnalysisResult] Invalid result/errors for ${mode} @ ${documentUri.fsPath}.`);
@@ -676,7 +685,6 @@ function activate(context) {
             }
             outputChannel.appendLine(`[handleAnalysisResult] Received ${result.errors.length} errors (before filtering) for ${documentUri.fsPath} (Mode: ${mode}):`);
             result.errors.forEach((err, index) => {
-                // 로그 추가: 모든 수신된 오류 표시
                 outputChannel.appendLine(`  [RawErr ${index + 1}] Type: ${err.errorType}, Line: ${err.line}, Col: ${err.column}, Msg: ${err.message.substring(0, 70)}...`);
             });
             const filteredErrors = result.errors.filter((err) => {
@@ -699,12 +707,57 @@ function activate(context) {
             filteredErrors.forEach((err, index) => {
                 outputChannel.appendLine(`  [FilteredErr ${index + 1}] Type: ${err.errorType}, Line: ${err.line}, Col: ${err.column}, Msg: ${err.message.substring(0, 70)}...`);
             });
+            // displayDiagnostics 호출 전에 인레이 힌트도 처리
+            const inlayHints = createInlayHints(filteredErrors, config);
+            inlayHintsCache.set(documentUri.toString(), inlayHints);
+            // VSCode에 힌트를 새로고침하도록 알림
+            onDidChangeInlayHints.fire();
             displayDiagnostics(documentUri, config, filteredErrors);
             if (mode === "static" && result.call_graph) {
                 outputChannel.appendLine(`[handleAnalysisResult] Call graph: ${result.call_graph.nodes.length} nodes, ${result.call_graph.links.length} links.`);
             }
         }
+        // --- 인레이 힌트 생성 함수 (신규 추가) ---
+        function createInlayHints(errors, config) {
+            const hints = [];
+            for (const err of errors) {
+                const { severity } = getSeverityAndUnderline(err.errorType, config);
+                // 설정된 심각도 레벨보다 낮거나 같은 경우에만 힌트 생성
+                if (severity <= config.severityLevel) {
+                    let hintText;
+                    if (err.errorType === "W0701") {
+                        // Infinite Loop
+                        hintText = `// Potential infinite loop`;
+                    }
+                    else if (err.errorType === "W0801") {
+                        // Recursion
+                        hintText = `// Potential recursion`;
+                    }
+                    if (hintText) {
+                        const range = createRange(err);
+                        const position = new vscode.Position(range.start.line, range.end.character);
+                        const hint = new vscode.InlayHint(position, hintText);
+                        hint.paddingLeft = true; // 힌트 왼쪽에 공백 추가
+                        hints.push(hint);
+                    }
+                }
+            }
+            return hints;
+        }
+        // --- createRange 헬퍼 함수 (displayDiagnostics에서 분리) ---
+        const createRange = (err) => {
+            const line = Math.max(0, err.line - 1);
+            const column = Math.max(0, err.column);
+            const toLine = Math.max(line, (err.to_line != null ? err.to_line : err.line) - 1);
+            const endColumn = Math.max(column + 1, err.end_column != null ? err.end_column : column + 1);
+            if (toLine < line || (toLine === line && endColumn <= column)) {
+                outputChannel.appendLine(`[createRange] Corrected invalid range for ${err.errorType}: L${err.line}C${err.column}`);
+                return new vscode.Range(line, column, line, column + 1);
+            }
+            return new vscode.Range(line, column, toLine, endColumn);
+        };
         function getSeverityAndUnderline(errorType, config) {
+            // ... (기존 코드와 동일) ...
             const lowerType = errorType.toLowerCase();
             let severity = vscode.DiagnosticSeverity.Error;
             let underline = false;
@@ -757,23 +810,11 @@ function activate(context) {
             const diagnostics = [];
             const decorations = [];
             let displayedCount = 0;
-            const createRange = (err) => {
-                const line = Math.max(0, err.line - 1);
-                const column = Math.max(0, err.column); // Parso/Astroid 0-based 가정
-                const toLine = Math.max(line, (err.to_line != null ? err.to_line : err.line) - 1);
-                const endColumn = Math.max(column + 1, err.end_column != null ? err.end_column : column + 1);
-                if (toLine < line || (toLine === line && endColumn <= column)) {
-                    outputChannel.appendLine(`[createRange] Corrected invalid range for ${err.errorType}: L${err.line}C${err.column}`);
-                    return new vscode.Range(line, column, line, column + 1);
-                }
-                return new vscode.Range(line, column, toLine, endColumn);
-            };
             errors.forEach((err) => {
                 try {
                     const range = createRange(err);
                     const { severity, underline } = getSeverityAndUnderline(err.errorType, config);
                     if (severity <= config.severityLevel) {
-                        // Error(0) .. Hint(3). 설정값보다 심각도가 높거나 같으면 표시
                         const diagnostic = new vscode.Diagnostic(range, err.message, severity);
                         diagnostic.source = "FindRuntimeErr";
                         diagnostic.code = err.errorType;
@@ -801,14 +842,17 @@ function activate(context) {
                 outputChannel.appendLine(`[displayDiagnostics] Editor not visible for ${documentUri.fsPath}. Decorations not applied.`);
             }
         }
+        // clearPreviousAnalysis 함수 수정: 인레이 힌트 캐시도 클리어
         function clearPreviousAnalysis(documentUri) {
             diagnosticCollection.delete(documentUri);
+            inlayHintsCache.delete(documentUri.toString());
+            onDidChangeInlayHints.fire(); // 힌트 새로고침
             const editor = vscode.window.visibleTextEditors.find((e) => e.document.uri.toString() === documentUri.toString());
             if (editor) {
                 editor.setDecorations(errorDecorationType, []);
             }
         }
-        // --- Hover Provider ---
+        // --- Hover Provider (기존과 동일) ---
         const hoverProvider = vscode.languages.registerHoverProvider({ language: "python", scheme: "file" }, {
             provideHover(document, position, token) {
                 try {
@@ -846,7 +890,17 @@ function activate(context) {
             },
         });
         context.subscriptions.push(hoverProvider);
-        // --- 이벤트 리스너 등록 ---
+        // **** 인레이 힌트 제공자 등록 (신규 추가) ****
+        const inlayHintsProvider = vscode.languages.registerInlayHintsProvider({ language: "python" }, {
+            // 힌트가 변경되었다는 이벤트를 제공 (VSCode가 이를 구독하여 자동으로 새로고침)
+            onDidChangeInlayHints: onDidChangeInlayHints.event,
+            provideInlayHints(document, range, token) {
+                // 캐시에서 현재 문서에 대한 힌트를 가져와 반환
+                return inlayHintsCache.get(document.uri.toString()) || [];
+            },
+        });
+        context.subscriptions.push(inlayHintsProvider);
+        // --- 이벤트 리스너 등록 (기존과 동일) ---
         const triggerRealtimeAnalysis = (document) => {
             if (document.languageId !== "python" || document.uri.scheme !== "file")
                 return;
@@ -909,7 +963,7 @@ function activate(context) {
                 analyzeCodeRealtime(vscode.window.activeTextEditor.document).catch((e) => { });
             }
         }));
-        // --- 명령어 등록 ---
+        // --- 명령어 등록 (기존과 동일) ---
         context.subscriptions.push(vscode.commands.registerCommand("findRuntimeErr.analyzeCurrentFile", async () => {
             try {
                 const editor = vscode.window.activeTextEditor;
@@ -969,8 +1023,9 @@ function activate(context) {
                 vscode.window.showErrorMessage(`동적 분석 오류: ${e.message}`);
             }
         }));
-        // --- 초기 실행 ---
+        // --- 초기 실행 (기존과 동일) ---
         async function runInitialAnalysis() {
+            // ... (이전 코드와 동일하므로 생략) ...
             const editor = vscode.window.activeTextEditor;
             if (editor &&
                 editor.document.languageId === "python" &&
@@ -1037,7 +1092,7 @@ function activate(context) {
         }
     }
 }
-// --- 확장 기능 비활성화 함수 ---
+// --- 확장 기능 비활성화 함수 (기존과 동일) ---
 function deactivate() {
     try {
         outputChannel?.appendLine("Deactivating FindRuntimeErr extension.");
@@ -1048,7 +1103,6 @@ function deactivate() {
             clearTimeout(debounceTimeout);
             debounceTimeout = null;
         }
-        // diagnosticCollection, errorDecorationType, hoverProvider 는 context.subscriptions에 의해 자동 dispose
         console.log("FindRuntimeErr extension resources disposed.");
     }
     catch (e) {

@@ -1,8 +1,4 @@
-"""
-Checkers 패키지 초기화 파일.
-이 파일은 각 체커 모듈에서 클래스들을 가져와서
-외부(core.py 등)에서 쉽게 사용할 수 있도록 목록을 만들어 제공합니다.
-"""
+# checkers/__init__.py
 
 # 1. Base 클래스들 import
 from checkers.base_checkers import BaseParsoChecker, BaseAstroidChecker
@@ -20,6 +16,8 @@ from checkers.static_checkers.key_error_checker import StaticKeyErrorChecker
 from checkers.static_checkers.infinite_loop_checker import StaticInfiniteLoopChecker
 from checkers.static_checkers.recursion_checker import StaticRecursionChecker
 from checkers.static_checkers.file_not_found_checker import StaticFileNotFoundChecker
+# --- 수정된 부분: 새로운 체커 import ---
+from checkers.static_checkers.zero_division_checker import StaticZeroDivisionChecker
 
 # 4. 외부에서 사용할 체커 목록 정의
 RT_CHECKERS_CLASSES = [
@@ -27,6 +25,7 @@ RT_CHECKERS_CLASSES = [
     RTZeroDivisionParsoChecker,
 ]
 
+# --- 수정된 부분: 새로운 체커를 목록에 추가 ---
 STATIC_CHECKERS_CLASSES = [
     StaticNameErrorChecker,
     StaticTypeErrorChecker,
@@ -34,8 +33,8 @@ STATIC_CHECKERS_CLASSES = [
     StaticIndexErrorChecker,
     StaticKeyErrorChecker,
     StaticInfiniteLoopChecker,
-    # StaticRecursionChecker는 Linter.analyze_astroid 에서 별도 처리되므로 목록에 넣지 않음
     StaticFileNotFoundChecker,
+    StaticZeroDivisionChecker, # <-- 추가
 ]
 
 __all__ = [
@@ -44,5 +43,6 @@ __all__ = [
     'StaticNameErrorChecker', 'StaticTypeErrorChecker', 'StaticAttributeErrorChecker',
     'StaticIndexErrorChecker', 'StaticKeyErrorChecker', 'StaticInfiniteLoopChecker',
     'StaticRecursionChecker', 'StaticFileNotFoundChecker',
+    'StaticZeroDivisionChecker', # <-- 추가
     'RT_CHECKERS_CLASSES', 'STATIC_CHECKERS_CLASSES'
 ]
