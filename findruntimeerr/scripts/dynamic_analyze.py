@@ -1,3 +1,5 @@
+import ast
+import astor
 import sys
 import json
 import traceback
@@ -111,6 +113,56 @@ def execute_function_tests(func_code, func_name, test_cases):
     """
     results = []
     namespace = {}
+    # Instrument code to guard against infinite loops with per-loop counters
+    try:
+        tree = ast.parse(func_code)
+        # Transformer to wrap While nodes and collect loop counter names
+        class LoopGuardTransformer(ast.NodeTransformer):
+            def __init__(self):
+                super().__init__()
+                self.loop_id = 0
+                self.counter_names = []
+                self.current_func_lineno = None
+                
+            def visit_FunctionDef(self, node):
+                # 현재 함수 시작 줄 번호 저장
+                self.current_func_lineno = node.lineno
+                return self.generic_visit(node)
+
+            def visit_While(self, node):
+                self.loop_id += 1
+                counter_name = f"_loop_counter_{self.loop_id}"
+                self.counter_names.append(counter_name)
+                # guard code to insert, include the original while line number
+                # 함수 시작 기준 상대적 줄 번호 계산
+                func_start = self.current_func_lineno or 0
+                rel_line = node.lineno - func_start + 1
+                guard_code = f"""
+{counter_name} += 1
+if {counter_name} > 100:
+    raise TimeoutError("Infinite loop detected in loop #{self.loop_id} starting at line {rel_line} (>100 iterations)")
+"""
+                guard_nodes = ast.parse(guard_code).body
+                # Preserve original line number for guard statements
+                for guard in guard_nodes:
+                    ast.copy_location(guard, node)
+                node.body = guard_nodes + node.body
+                # visit child nodes
+                self.generic_visit(node)
+                return node
+
+        transformer = LoopGuardTransformer()
+        tree = transformer.visit(tree)
+        # Insert counter initializations at start of function body
+        func_def = tree.body[0]
+        for name in transformer.counter_names:
+            init = ast.parse(f"{name} = 0").body[0]
+            func_def.body.insert(0, init)
+        ast.fix_missing_locations(tree)
+        func_code = astor.to_source(tree)
+    except Exception as e:
+        # If instrumentation fails, fall back to original code
+        print(f"[LoopGuard] Instrumentation failed: {e}", file=sys.stderr)
     # 함수 정의 로드
     exec(func_code, namespace)
     func = namespace.get(func_name)

@@ -6,6 +6,7 @@ exports.deactivate = deactivate;
 const vscode = require("vscode");
 const child_process_1 = require("child_process");
 const path = require("path");
+let dynamicProcess = null;
 // --- 전역 변수 ---
 let outputChannel;
 let diagnosticCollection;

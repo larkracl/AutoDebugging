@@ -1,8 +1,11 @@
 // src/extension.ts
 import * as vscode from "vscode";
-import { spawn, SpawnOptionsWithoutStdio, execSync } from "child_process";
+import { spawn, SpawnOptionsWithoutStdio, execSync, ChildProcess } from "child_process";
 import * as path from "path";
 import * as fs from "fs";
+import * as os from "os";
+
+let dynamicProcess: ChildProcess | null = null;
 
 // --- 인터페이스 정의 ---
 interface ExtensionConfig {
@@ -474,6 +477,68 @@ export function activate(context: vscode.ExtensionContext) {
                   `정적 분석 완료. ${result.errors.length}개 이슈 발견.`
                 );
               }
+            );
+          }
+        }
+      )
+    );
+    context.subscriptions.push(
+      vscode.commands.registerCommand(
+        "findRuntimeErr.runDynamicAnalysis",
+
+        () => {
+          const editor = vscode.window.activeTextEditor;
+          if (editor && editor.document.languageId === "python") {
+            outputChannel.appendLine("[Command] findRuntimeErr.runDynamicAnalysis executed.");
+            const config = getConfiguration();
+            clearPreviousAnalysis(editor.document.uri);
+
+            runDynamicAnalysisProcess(editor.document.getText(), editor.document.uri)
+              .then((result) => {
+                handleAnalysisResult(editor.document.uri, config, result, "dynamic");
+                // Function-level error summary
+                const summaryCounts: { [fn: string]: number } = {};
+                result.errors.forEach(err => {
+                  const match = err.message.match(/Function `(.+?)` failed/);
+                  const fn = match ? match[1] : 'unknown';
+                  summaryCounts[fn] = (summaryCounts[fn] || 0) + 1;
+                });
+                outputChannel.appendLine('[Dynamic Analysis Summary]');
+                for (const [fn, cnt] of Object.entries(summaryCounts)) {
+                  outputChannel.appendLine(`  ${fn}: ${cnt} error(s)`);
+                }
+                vscode.window.showInformationMessage(
+                  `FindRuntimeErr: Dynamic analysis completed. ${result.errors.length} error(s) found.`
+                );
+              })
+              .catch((error) => {
+                outputChannel.appendLine(`[Command Error] Dynamic analysis failed: ${error.message}`);
+                vscode.window.showErrorMessage(
+                  `FindRuntimeErr: Dynamic analysis failed. ${error.message}`
+                );
+              });
+          } else {
+            vscode.window.showWarningMessage(
+              "FindRuntimeErr: Please open a Python file to run dynamic analysis."
+            );
+          }
+        })
+    );
+    // Command to kill the running dynamic analysis Python process
+    context.subscriptions.push(
+      vscode.commands.registerCommand(
+        "findRuntimeErr.killPythonProcess",
+        () => {
+          if (dynamicProcess) {
+            dynamicProcess.kill();
+            outputChannel.appendLine("[Command] Python process killed by user.");
+            vscode.window.showInformationMessage(
+              "FindRuntimeErr: Python process has been terminated."
+            );
+            dynamicProcess = null;
+          } else {
+            vscode.window.showWarningMessage(
+              "FindRuntimeErr: No Python process is currently running."
             );
           }
         }
