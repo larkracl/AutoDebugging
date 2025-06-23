@@ -6,6 +6,7 @@ import traceback
 import astroid
 import os
 import re
+import tracemalloc
 
 from google import genai
 
@@ -107,12 +108,13 @@ def generate_test_cases(func_name, comment):
         cases = []
     return cases
 
-def execute_function_tests(func_code, func_name, test_cases):
+def execute_function_tests(func_code, func_name, test_cases, memory_limit=None):
     """
     단일 함수 정의(func_code)를 실행 환경에 로드하고, 각 테스트케이스를 호출해 결과 수집.
     """
     results = []
     namespace = {}
+    # Ensure tracemalloc is available (imported at top)
     # Instrument code to guard against infinite loops with per-loop counters
     try:
         tree = ast.parse(func_code)
@@ -169,22 +171,40 @@ if {counter_name} > 100:
     for case in test_cases:
         inp = case.get("input", [])
         exp = case.get("expected")
+        # Start memory tracing for this test case
+        tracemalloc.start()
+        out = None
+        success = False
+        e = None
         try:
             out = func(*inp)
             success = out == exp
+        except Exception as exc:
+            e = exc
+        # Get peak memory usage
+        current, peak = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+        if memory_limit is not None and peak > memory_limit:
             results.append({
                 "input": inp,
                 "expected": exp,
-                "output": out,
-                "success": success
+                "error": f"Memory limit exceeded: used {peak} bytes > limit {memory_limit} bytes",
+                "success": False,
+                "peak_memory": peak
             })
-        except Exception as e:
-            results.append({
-                "input": inp,
-                "expected": exp,
-                "error": str(e),
-                "success": False
-            })
+            continue
+        result_entry = {
+            "input": inp,
+            "expected": exp,
+            "peak_memory": peak,
+            "success": success
+        }
+        if success:
+            result_entry["output"] = out
+        else:
+            result_entry["error"] = str(e) if e is not None else f"Expected {exp}, got {out}"
+        results.append(result_entry)
+        continue
     return results
 
 def analyze_dynamic_data(runtime_data: dict) -> list:
@@ -210,10 +230,11 @@ def analyze_dynamic_data(runtime_data: dict) -> list:
         visit(fname)
 
     errors = []
+    memory_limit = runtime_data.get("memory_limit")
     for fname in order:
         data = functions[fname]
         cases = generate_test_cases(fname, data["comment"])
-        results = execute_function_tests(data["code"], fname, cases)
+        results = execute_function_tests(data["code"], fname, cases, memory_limit)
         for r in results:
             if not r["success"]:
                 msg = r.get("error") or f"Expected {r['expected']}, got {r.get('output')}"
@@ -226,9 +247,12 @@ def analyze_dynamic_data(runtime_data: dict) -> list:
     return errors
 
 if __name__ == "__main__":
-    # 전체 파일 코드 전달
-    code = sys.stdin.read()
-    runtime_data = {"code": code}
+    # 전체 파일 코드 전달 및 memory_limit 파싱
+    raw = sys.stdin.read()
+    try:
+        runtime_data = json.loads(raw)
+    except json.JSONDecodeError:
+        runtime_data = {"code": raw}
     try:
         errors = analyze_dynamic_data(runtime_data)
     except Exception as e:

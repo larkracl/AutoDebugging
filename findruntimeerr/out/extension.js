@@ -52,6 +52,7 @@ function activate(context) {
                 minAnalysisLength: config.get("minAnalysisLength", 10),
                 pythonPath: config.get("pythonPath", null),
                 enableInlayHints: config.get("enableInlayHints", true),
+                memoryLimit: config.get("memoryLimit", 100000000),
             };
         }
         async function getSelectedPythonPath(resource) {
@@ -237,6 +238,7 @@ function activate(context) {
         }
         async function runDynamicAnalysisProcess(code, documentUri) {
             let pythonExecutable;
+            const config = getConfiguration();
             try {
                 pythonExecutable = await getSelectedPythonPath(documentUri);
             }
@@ -291,7 +293,11 @@ function activate(context) {
                 const proc = dynamicProcess;
                 let stdoutData = "";
                 let stderrData = "";
-                proc.stdin?.write(code);
+                const runtimeData = {
+                    code,
+                    memory_limit: config.memoryLimit
+                };
+                proc.stdin?.write(JSON.stringify(runtimeData), "utf-8");
                 proc.stdin?.end();
                 proc.stdout?.on("data", (data) => {
                     stdoutData += data;

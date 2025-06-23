@@ -16,6 +16,7 @@ interface ExtensionConfig {
   minAnalysisLength: number;
   pythonPath: string | null;
   enableInlayHints: boolean;
+  memoryLimit: number;
 }
 interface ErrorInfo {
   message: string;
@@ -84,6 +85,7 @@ export function activate(context: vscode.ExtensionContext) {
         minAnalysisLength: config.get<number>("minAnalysisLength", 10),
         pythonPath: config.get<string | null>("pythonPath", null),
         enableInlayHints: config.get<boolean>("enableInlayHints", true),
+        memoryLimit: config.get<number>("memoryLimit", 100000000),
       };
     }
 
@@ -285,6 +287,7 @@ export function activate(context: vscode.ExtensionContext) {
       documentUri?: vscode.Uri
     ): Promise<AnalysisResult> {
       let pythonExecutable: string;
+      const config = getConfiguration();
       try {
         pythonExecutable = await getSelectedPythonPath(documentUri);
       } catch (e: any) {
@@ -344,7 +347,11 @@ export function activate(context: vscode.ExtensionContext) {
         const proc = dynamicProcess;
         let stdoutData = "";
         let stderrData = "";
-        proc.stdin?.write(code);
+        const runtimeData = {
+          code,
+          memory_limit: config.memoryLimit
+        };
+        proc.stdin?.write(JSON.stringify(runtimeData), "utf-8");
         proc.stdin?.end();
         proc.stdout?.on("data", (data) => {
           stdoutData += data;
