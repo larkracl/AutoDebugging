@@ -1,8 +1,11 @@
 // src/extension.ts
 import * as vscode from "vscode";
-import { spawn, SpawnOptionsWithoutStdio, execSync } from "child_process";
+import { spawn, SpawnOptionsWithoutStdio, execSync, ChildProcess } from "child_process";
 import * as path from "path";
 import * as fs from "fs";
+import * as os from "os";
+
+let dynamicProcess: ChildProcess | null = null;
 
 // --- 인터페이스 정의 ---
 interface ExtensionConfig {
@@ -277,6 +280,142 @@ export function activate(context: vscode.ExtensionContext) {
       });
     }
 
+    async function runDynamicAnalysisProcess(
+      code: string,
+      documentUri?: vscode.Uri
+    ): Promise<AnalysisResult> {
+      let pythonExecutable: string;
+      try {
+        pythonExecutable = await getSelectedPythonPath(documentUri);
+      } catch (e: any) {
+        return {
+          errors: [
+            {
+              message: `Failed to determine Python path: ${e.message}`,
+              line: 1,
+              column: 0,
+              errorType: "PythonPathError",
+            },
+          ],
+          call_graph: null,
+        };
+      }
+      // Check packages
+      const pkgCheck = checkPythonPackages(pythonExecutable);
+      if (pkgCheck.missing.length > 0) {
+        return {
+          errors: [
+            {
+              message: `Missing packages: ${pkgCheck.missing.join(
+                ", "
+              )}. Please install in ${pythonExecutable}.`,
+              line: 1,
+              column: 0,
+              errorType: "MissingDependencyError",
+            },
+          ],
+          call_graph: null,
+        };
+      }
+
+      const extensionRootPath = context.extensionPath;
+      const scriptDir = path.join(extensionRootPath, "scripts");
+      const scriptPath = path.join(scriptDir, "dynamic_analyze.py");
+      if (!fs.existsSync(scriptPath)) {
+        return {
+          errors: [
+            {
+              message: `dynamic_analyze.py not found at ${scriptPath}`,
+              line: 1,
+              column: 0,
+              errorType: "ScriptNotFoundError",
+            },
+          ],
+          call_graph: null,
+        };
+      }
+
+      return new Promise((resolve) => {
+        const spawnOpts: SpawnOptionsWithoutStdio = { cwd: scriptDir };
+        outputChannel.appendLine(
+          `[runDynamicAnalysisProcess] Spawning: "${pythonExecutable}" "${scriptPath}"`
+        );
+        dynamicProcess = spawn(pythonExecutable, [scriptPath], spawnOpts);
+        const proc = dynamicProcess;
+        let stdoutData = "";
+        let stderrData = "";
+        proc.stdin?.write(code);
+        proc.stdin?.end();
+        proc.stdout?.on("data", (data) => {
+          stdoutData += data;
+        });
+        proc.stderr?.on("data", (data) => {
+          stderrData += data;
+          outputChannel.appendLine(`[runDynamicAnalysisProcess] STDERR: ${data}`);
+        });
+        proc.on("close", (code, signal) => {
+          // If process was killed (code === null), treat as user abort and return no errors
+          if (code === null) {
+            outputChannel.appendLine(`[runDynamicAnalysisProcess] Process killed by user (signal: ${signal}). Aborting dynamic analysis.`);
+            resolve({ errors: [], call_graph: null });
+            dynamicProcess = null;
+            return;
+          }
+          outputChannel.appendLine(
+            `[runDynamicAnalysisProcess] Process exited with code ${code}`
+          );
+          outputChannel.appendLine(
+            `[runDynamicAnalysisProcess] RAW STDOUT: ${stdoutData}`
+          );
+          if (code !== 0) {
+            resolve({
+              errors: [
+                {
+                  message: `Dynamic analysis failed (Exit ${code}): ${stderrData.trim()}`,
+                  line: 1,
+                  column: 0,
+                  errorType: "DynamicScriptError",
+                },
+              ],
+              call_graph: null,
+            });
+            return;
+          }
+          try {
+            const result: AnalysisResult = JSON.parse(stdoutData);
+            resolve(result);
+          } catch (e: any) {
+            resolve({
+              errors: [
+                {
+                  message: `Error parsing dynamic analysis result: ${e.message}`,
+                  line: 1,
+                  column: 0,
+                  errorType: "JSONParseError",
+                },
+              ],
+              call_graph: null,
+            });
+          }
+          dynamicProcess = null;
+        });
+        proc.on("error", (err) => {
+          resolve({
+            errors: [
+              {
+                message: `Failed to start dynamic analysis process: ${err.message}`,
+                line: 1,
+                column: 0,
+                errorType: "SpawnError",
+              },
+            ],
+            call_graph: null,
+          });
+          dynamicProcess = null;
+        });
+      });
+    }
+
     function handleAnalysisResult(
       documentUri: vscode.Uri,
       config: ExtensionConfig,
@@ -474,6 +613,68 @@ export function activate(context: vscode.ExtensionContext) {
                   `정적 분석 완료. ${result.errors.length}개 이슈 발견.`
                 );
               }
+            );
+          }
+        }
+      )
+    );
+    context.subscriptions.push(
+      vscode.commands.registerCommand(
+        "findRuntimeErr.runDynamicAnalysis",
+
+        () => {
+          const editor = vscode.window.activeTextEditor;
+          if (editor && editor.document.languageId === "python") {
+            outputChannel.appendLine("[Command] findRuntimeErr.runDynamicAnalysis executed.");
+            const config = getConfiguration();
+            clearPreviousAnalysis(editor.document.uri);
+
+            runDynamicAnalysisProcess(editor.document.getText(), editor.document.uri)
+              .then((result) => {
+                handleAnalysisResult(editor.document.uri, config, result);
+                // Function-level error summary
+                const summaryCounts: { [fn: string]: number } = {};
+                result.errors.forEach(err => {
+                  const match = err.message.match(/Function `(.+?)` failed/);
+                  const fn = match ? match[1] : 'unknown';
+                  summaryCounts[fn] = (summaryCounts[fn] || 0) + 1;
+                });
+                outputChannel.appendLine('[Dynamic Analysis Summary]');
+                for (const [fn, cnt] of Object.entries(summaryCounts)) {
+                  outputChannel.appendLine(`  ${fn}: ${cnt} error(s)`);
+                }
+                vscode.window.showInformationMessage(
+                  `FindRuntimeErr: Dynamic analysis completed. ${result.errors.length} error(s) found.`
+                );
+              })
+              .catch((error) => {
+                outputChannel.appendLine(`[Command Error] Dynamic analysis failed: ${error.message}`);
+                vscode.window.showErrorMessage(
+                  `FindRuntimeErr: Dynamic analysis failed. ${error.message}`
+                );
+              });
+          } else {
+            vscode.window.showWarningMessage(
+              "FindRuntimeErr: Please open a Python file to run dynamic analysis."
+            );
+          }
+        })
+    );
+    // Command to kill the running dynamic analysis Python process
+    context.subscriptions.push(
+      vscode.commands.registerCommand(
+        "findRuntimeErr.killPythonProcess",
+        () => {
+          if (dynamicProcess) {
+            dynamicProcess.kill();
+            outputChannel.appendLine("[Command] Python process killed by user.");
+            vscode.window.showInformationMessage(
+              "FindRuntimeErr: Python process has been terminated."
+            );
+            dynamicProcess = null;
+          } else {
+            vscode.window.showWarningMessage(
+              "FindRuntimeErr: No Python process is currently running."
             );
           }
         }
