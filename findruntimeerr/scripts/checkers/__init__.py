@@ -6,6 +6,7 @@ from checkers.base_checkers import BaseParsoChecker, BaseAstroidChecker
 # 2. 실시간 Parso 체커들 import
 from checkers.rt_checkers.name_error_checker import RTNameErrorParsoChecker
 from checkers.rt_checkers.zero_division_checker import RTZeroDivisionParsoChecker
+from checkers.rt_checkers.import_error_checker import RTImportErrorChecker
 
 # 3. 상세 Astroid 체커들 import
 from checkers.static_checkers.name_error_checker import StaticNameErrorChecker
