@@ -65,12 +65,8 @@
           "items": {
             "type": "string"
           }
-        },
-        "findRuntimeErr.memoryLimit": {
-          "type": "number",
-          "default": 100000000,
-          "description": "허용할 최대 메모리 사용량(바이트 단위)"
         }
+        
       },
       "inlayHintProvider": [
       {
