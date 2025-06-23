@@ -24,6 +24,7 @@ from checkers.static_checkers.zero_division_checker import StaticZeroDivisionChe
 RT_CHECKERS_CLASSES = [
     RTNameErrorParsoChecker,
     RTZeroDivisionParsoChecker,
+    RTImportErrorChecker,
 ]
 
 # --- 수정된 부분: 새로운 체커를 목록에 추가 ---
@@ -35,7 +36,7 @@ STATIC_CHECKERS_CLASSES = [
     StaticKeyErrorChecker,
     StaticInfiniteLoopChecker,
     StaticFileNotFoundChecker,
-    StaticZeroDivisionChecker, # <-- 추가
+    StaticZeroDivisionChecker, 
 ]
 
 __all__ = [
