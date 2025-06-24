@@ -41,7 +41,7 @@ STATIC_CHECKERS_CLASSES = [
 
 __all__ = [
     'BaseParsoChecker', 'BaseAstroidChecker',
-    'RTNameErrorParsoChecker', 'RTZeroDivisionParsoChecker',
+    'RTNameErrorParsoChecker', 'RTZeroDivisionParsoChecker','RTImportErrorChecker',
     'StaticNameErrorChecker', 'StaticTypeErrorChecker', 'StaticAttributeErrorChecker',
     'StaticIndexErrorChecker', 'StaticKeyErrorChecker', 'StaticInfiniteLoopChecker',
     'StaticRecursionChecker', 'StaticFileNotFoundChecker',
