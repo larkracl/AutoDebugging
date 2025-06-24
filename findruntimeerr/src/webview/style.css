@@ -1,0 +1,148 @@
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  margin: 0;
+  padding: 20px;
+  background-color: var(--vscode-editor-background);
+  color: var(--vscode-editor-foreground);
+}
+.container {
+  max-width: 1000px;
+  margin: 0 auto;
+}
+h1 {
+  color: var(--vscode-editor-foreground);
+  border-bottom: 1px solid var(--vscode-panel-border);
+  padding-bottom: 10px;
+  margin-bottom: 20px;
+}
+/* 탭 스타일 */
+.tab-container {
+  border-bottom: 1px solid var(--vscode-panel-border);
+  margin-bottom: 20px;
+}
+.tab-buttons {
+  display: flex;
+}
+.tab-button {
+  background-color: var(--vscode-editor-inactiveSelectionBackground);
+  color: var(--vscode-editor-foreground);
+  border: 1px solid var(--vscode-panel-border);
+  border-bottom: none;
+  padding: 12px 24px;
+  cursor: pointer;
+  font-size: 14px;
+  transition: all 0.2s;
+  border-top-left-radius: 6px;
+  border-top-right-radius: 6px;
+}
+.tab-button.active {
+  background-color: var(--vscode-editor-background);
+  border-bottom: 1px solid var(--vscode-editor-background);
+  margin-bottom: -1px;
+}
+.tab-button:hover:not(.active) {
+  background-color: var(--vscode-list-hoverBackground);
+}
+.tab-content {
+  display: none;
+  padding: 20px;
+  background-color: var(--vscode-editor-background);
+  border: 1px solid var(--vscode-panel-border);
+  border-top: none;
+  border-radius: 0 0 6px 6px;
+}
+.tab-content.active {
+  display: block;
+}
+.analysis-section {
+  background-color: var(--vscode-editor-inactiveSelectionBackground);
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 6px;
+  padding: 20px;
+  margin: 20px 0;
+}
+.button {
+  background-color: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+  border: none;
+  padding: 10px 20px;
+  border-radius: 4px;
+  cursor: pointer;
+  margin: 5px;
+  font-size: 14px;
+}
+.button:hover {
+  background-color: var(--vscode-button-hoverBackground);
+}
+/* 오류 목록 스타일 */
+.error-list {
+  margin-top: 20px;
+}
+.error-item {
+  background-color: var(--vscode-editor-inactiveSelectionBackground);
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 6px;
+  padding: 15px;
+  margin: 10px 0;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.error-item:hover {
+  background-color: var(--vscode-list-hoverBackground);
+}
+.error-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.error-type {
+  background-color: var(--vscode-errorForeground);
+  color: var(--vscode-editor-background);
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: bold;
+}
+.error-location {
+  color: var(--vscode-descriptionForeground);
+  font-size: 12px;
+}
+.error-message {
+  color: var(--vscode-editor-foreground);
+  font-size: 14px;
+  line-height: 1.4;
+}
+.no-errors {
+  text-align: center;
+  color: var(--vscode-descriptionForeground);
+  padding: 40px;
+  font-style: italic;
+}
+/* 파일 정보 스타일 */
+.file-info {
+  background-color: var(--vscode-editor-inactiveSelectionBackground);
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 6px;
+  padding: 15px;
+  margin-bottom: 20px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.file-label {
+  font-weight: bold;
+  font-size: 14px;
+  white-space: nowrap;
+}
+.file-path {
+  color: var(--vscode-textPreformat-foreground);
+  font-family: "Courier New", monospace;
+  font-size: 13px;
+  word-break: break-all;
+  flex: 1;
+}
+.file-path.no-file {
+  color: var(--vscode-descriptionForeground);
+  font-style: italic;
+}

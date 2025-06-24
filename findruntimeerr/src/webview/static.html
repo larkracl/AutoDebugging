@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>정적 분석</title>
+    <link rel="stylesheet" href="${styleUri}" />
+  </head>
+  <body>
+    <div class="container">
+      <h1>정적 분석</h1>
+      <div class="file-info" id="fileInfo">
+        <div class="file-label">현재 파일:</div>
+        <div class="file-path" id="currentFilePath">파일을 선택해주세요.</div>
+      </div>
+      <div class="tab-container">
+        <div class="tab-buttons">
+          <button class="tab-button active" data-tab="realtime">
+            실시간 분석
+          </button>
+          <button class="tab-button" data-tab="precise">정밀 분석</button>
+        </div>
+      </div>
+
+      <!-- 실시간 분석 탭 -->
+      <div id="realtime-tab" class="tab-content active">
+        <!-- ===== 여기가 복원된 부분 ===== -->
+        <div class="analysis-section">
+          <h3>실시간 분석 설정</h3>
+          <p>
+            파일을 수정하거나 저장할 때 자동으로 실행되는 가벼운 분석입니다.
+          </p>
+          <button class="button" id="toggleRealtimeBtn">상태 로딩 중...</button>
+          <div id="realtimeStatus" class="status">상태: 확인 중...</div>
+        </div>
+        <!-- ===== 복원 끝 ===== -->
+
+        <div class="analysis-section">
+          <h3>실시간 분석 결과</h3>
+          <button class="button" id="refreshRealtimeBtn">결과 새로고침</button>
+          <div id="realtimeErrorList" class="error-list">
+            <div class="no-errors">결과 없음</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 정밀 분석 탭 -->
+      <div id="precise-tab" class="tab-content">
+        <div class="analysis-section">
+          <h3>정밀 분석 실행</h3>
+          <p>전체 파일을 대상으로 깊이 있는 분석을 실행합니다.</p>
+          <button class="button" id="runPreciseBtn">정밀 분석 실행</button>
+          <div id="preciseStatus" class="status">상태: 대기 중</div>
+        </div>
+        <div class="analysis-section">
+          <h3>정밀 분석 결과</h3>
+          <button class="button" id="refreshPreciseBtn">결과 새로고침</button>
+          <div id="preciseErrorList" class="error-list">
+            <div class="no-errors">결과 없음</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <script src="${scriptUri}"></script>
+  </body>
+</html>

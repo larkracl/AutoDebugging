@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>동적 분석</title>
+    <link rel="stylesheet" href="${styleUri}" />
+    <style>
+      .input-group {
+        margin: 15px 0;
+      }
+      .input-label {
+        display: block;
+        margin-bottom: 5px;
+        font-weight: bold;
+      }
+      .input-field {
+        width: 200px;
+        padding: 8px;
+        border: 1px solid var(--vscode-input-border);
+        border-radius: 4px;
+        background-color: var(--vscode-input-background);
+        color: var(--vscode-input-foreground);
+        font-size: 14px;
+      }
+      .input-field:focus {
+        outline: none;
+        border-color: var(--vscode-focusBorder);
+      }
+      .test-result {
+        background-color: var(--vscode-editor-inactiveSelectionBackground);
+        border: 1px solid var(--vscode-panel-border);
+        border-radius: 6px;
+        padding: 15px;
+        margin: 10px 0;
+      }
+      .function-name {
+        font-weight: bold;
+        color: var(--vscode-editor-foreground);
+        margin-bottom: 10px;
+        font-size: 16px;
+      }
+      .test-case {
+        background-color: var(--vscode-editor-background);
+        border: 1px solid var(--vscode-panel-border);
+        border-radius: 4px;
+        padding: 10px;
+        margin: 5px 0;
+      }
+      .test-input,
+      .test-expected,
+      .test-actual {
+        font-family: "Courier New", monospace;
+        font-size: 13px;
+        margin-bottom: 5px;
+        word-break: break-all;
+      }
+      .test-input {
+        color: var(--vscode-descriptionForeground);
+      }
+      .test-success {
+        border-left: 3px solid var(--vscode-testing-iconPassed);
+      }
+      .test-failure {
+        border-left: 3px solid var(--vscode-testing-iconFailed);
+      }
+      .no-tests {
+        text-align: center;
+        color: var(--vscode-descriptionForeground);
+        padding: 40px;
+        font-style: italic;
+      }
+      .progress-container {
+        margin: 20px 0;
+        display: none;
+      }
+      .progress-bar {
+        width: 100%;
+        height: 8px;
+        background-color: var(--vscode-progressBar-background);
+        border-radius: 4px;
+        overflow: hidden;
+        margin-bottom: 10px;
+      }
+      .progress-fill {
+        height: 100%;
+        background-color: var(--vscode-button-background);
+        width: 0%;
+        transition: width 0.3s ease;
+      }
+      .progress-text {
+        text-align: center;
+        font-size: 14px;
+        margin-bottom: 10px;
+      }
+      .step-list {
+        list-style: none;
+        padding: 0;
+        margin: 0;
+      }
+      .step-item {
+        padding: 8px 12px;
+        margin: 5px 0;
+        border-radius: 4px;
+        font-size: 13px;
+        display: flex;
+        align-items: center;
+        transition: all 0.3s;
+      }
+      .step-item.pending {
+        background-color: var(--vscode-editor-inactiveSelectionBackground);
+        color: var(--vscode-descriptionForeground);
+      }
+      .step-item.active {
+        background-color: var(--vscode-input-background);
+        color: var(--vscode-editor-foreground);
+        font-weight: bold;
+      }
+      .step-item.completed {
+        background-color: var(--vscode-testing-iconPassed);
+        color: black;
+      }
+      .step-item.error {
+        background-color: var(--vscode-testing-iconFailed);
+        color: white;
+      }
+      .step-icon {
+        margin-right: 10px;
+        font-size: 16px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>동적 분석</h1>
+      <div class="file-info" id="fileInfo">
+        <div class="file-label">현재 파일:</div>
+        <div class="file-path" id="currentFilePath">파일을 선택해주세요.</div>
+      </div>
+      <div class="tab-container">
+        <div class="tab-buttons">
+          <button class="tab-button active" data-tab="ai">
+            AI 테스트 생성
+          </button>
+        </div>
+      </div>
+
+      <div id="ai-tab" class="tab-content active">
+        <div class="analysis-section">
+          <h3>AI 기반 자동 테스트</h3>
+          <p>
+            현재 파일의 함수와 주석을 기반으로 Gemini API가 테스트케이스를
+            생성하고 실행합니다.
+          </p>
+          <!-- 메모리 제한 설정 UI 복원 -->
+          <div class="input-group">
+            <label class="input-label" for="memoryLimit"
+              >메모리 제한 (Bytes):</label
+            >
+            <input
+              type="number"
+              id="memoryLimit"
+              class="input-field"
+              value="1048576"
+            />
+          </div>
+          <button class="button" id="runDynamicAnalysisBtn">
+            AI 테스트 실행
+          </button>
+          <button
+            class="button"
+            id="killBtn"
+            style="
+              display: none;
+              background-color: var(--vscode-errorForeground);
+            "
+          >
+            실행 중단
+          </button>
+          <div id="dynamicStatus" class="status">상태: 대기 중</div>
+        </div>
+
+        <div id="progressContainer" class="progress-container">
+          <div class="progress-text" id="progressText">분석 대기 중</div>
+          <div class="progress-bar">
+            <div class="progress-fill" id="progressFill"></div>
+          </div>
+          <ul class="step-list" id="stepList">
+            <li class="step-item pending" id="step1">
+              <span class="step-icon">⚪</span
+              ><span>환경 준비 및 함수 분석</span>
+            </li>
+            <li class="step-item pending" id="step2">
+              <span class="step-icon">⚪</span><span>AI 테스트케이스 생성</span>
+            </li>
+            <li class="step-item pending" id="step3">
+              <span class="step-icon">⚪</span
+              ><span>테스트 실행 및 결과 분석</span>
+            </li>
+          </ul>
+        </div>
+
+        <div class="analysis-section">
+          <h3>테스트 실행 결과</h3>
+          <div id="testResults">
+            <div class="no-tests">테스트를 실행하여 결과를 확인하세요.</div>
+          </div>
+        </div>
+
+        <div class="analysis-section">
+          <h3>발견된 런타임 오류</h3>
+          <div id="errorList">
+            <div class="no-errors">발견된 오류가 없습니다.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <script src="${scriptUri}"></script>
+  </body>
+</html>
