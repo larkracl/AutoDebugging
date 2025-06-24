@@ -928,8 +928,6 @@ export function activate(context: vscode.ExtensionContext) {
             try {
               const result = await runDynamicAnalysisProcess(editor.document.getText(), editor.document.uri);
               
-              handleAnalysisResult(editor.document.uri, config, result);
-              
               // 동적분석 결과 저장
               saveDynamicAnalysisResult(editor.document.uri.toString(), result);
               
