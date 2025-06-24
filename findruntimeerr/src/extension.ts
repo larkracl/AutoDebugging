@@ -4,6 +4,7 @@ import { spawn, SpawnOptionsWithoutStdio, execSync, ChildProcess } from "child_p
 import * as path from "path";
 import * as fs from "fs";
 import * as os from "os";
+import { WebviewManager } from './webviewManager';
 
 let dynamicProcess: ChildProcess | null = null;
 
@@ -16,7 +17,6 @@ interface ExtensionConfig {
   minAnalysisLength: number;
   pythonPath: string | null;
   enableInlayHints: boolean;
-  memoryLimit: number;
 }
 interface ErrorInfo {
   message: string;
@@ -25,6 +25,7 @@ interface ErrorInfo {
   to_line?: number;
   end_column?: number;
   errorType: string;
+  filePath?: string;
 }
 interface CallGraphData {
   nodes: { id: string; [key: string]: any }[];
@@ -43,6 +44,48 @@ let checkedPackages = false;
 let debounceTimeout: NodeJS.Timeout | null = null;
 const inlayHintsCache = new Map<string, vscode.InlayHint[]>();
 
+// 분석 결과 저장용 전역 변수
+let realtimeAnalysisResults: Map<string, ErrorInfo[]> = new Map();
+let preciseAnalysisResults: Map<string, ErrorInfo[]> = new Map();
+let dynamicAnalysisResults: Map<string, any> = new Map(); // 동적분석 결과 저장
+
+// 분석 결과 저장 함수들
+export function saveRealtimeAnalysisResult(documentUri: string, errors: ErrorInfo[]): void {
+  realtimeAnalysisResults.set(documentUri, errors);
+}
+
+export function savePreciseAnalysisResult(documentUri: string, errors: ErrorInfo[]): void {
+  preciseAnalysisResults.set(documentUri, errors);
+}
+
+export function saveDynamicAnalysisResult(documentUri: string, result: any): void {
+  dynamicAnalysisResults.set(documentUri, result);
+}
+
+export function getRealtimeAnalysisResults(): ErrorInfo[] {
+  const allErrors: ErrorInfo[] = [];
+  realtimeAnalysisResults.forEach(errors => {
+    allErrors.push(...errors);
+  });
+  return allErrors;
+}
+
+export function getPreciseAnalysisResults(): ErrorInfo[] {
+  const allErrors: ErrorInfo[] = [];
+  preciseAnalysisResults.forEach(errors => {
+    allErrors.push(...errors);
+  });
+  return allErrors;
+}
+
+export function getDynamicAnalysisResults(): any[] {
+  const allResults: any[] = [];
+  dynamicAnalysisResults.forEach(result => {
+    allResults.push(result);
+  });
+  return allResults;
+}
+
 // --- 확장 기능 활성화 함수 ---
 export function activate(context: vscode.ExtensionContext) {
   try {
@@ -50,6 +93,51 @@ export function activate(context: vscode.ExtensionContext) {
     diagnosticCollection =
       vscode.languages.createDiagnosticCollection("findRuntimeErr");
     context.subscriptions.push(diagnosticCollection);
+
+    // 상태 표시줄에 버튼 추가
+    const staticAnalysisButton = vscode.window.createStatusBarItem(
+      vscode.StatusBarAlignment.Left,
+      100
+    );
+    staticAnalysisButton.text = "$(search) 정적분석";
+    staticAnalysisButton.tooltip = "정적 분석 실행";
+    staticAnalysisButton.command = "findRuntimeErr.staticAnalysis";
+    staticAnalysisButton.show();
+
+    const dynamicAnalysisButton = vscode.window.createStatusBarItem(
+      vscode.StatusBarAlignment.Left,
+      99
+    );
+    dynamicAnalysisButton.text = "$(play) 동적분석";
+    dynamicAnalysisButton.tooltip = "동적 분석 실행";
+    dynamicAnalysisButton.command = "findRuntimeErr.dynamicAnalysis";
+    dynamicAnalysisButton.show();
+
+    // 컨텍스트에 추가
+    context.subscriptions.push(staticAnalysisButton);
+    context.subscriptions.push(dynamicAnalysisButton);
+
+    // 명령어 등록
+    const staticAnalysisCommand = vscode.commands.registerCommand(
+      "findRuntimeErr.staticAnalysis",
+      () => {
+        // 정적분석 웹뷰 패널 열기
+        const webviewManager = WebviewManager.getInstance();
+        webviewManager.createStaticAnalysisPanel(context);
+      }
+    );
+
+    const dynamicAnalysisCommand = vscode.commands.registerCommand(
+      "findRuntimeErr.dynamicAnalysis",
+      () => {
+        // 동적분석 웹뷰 패널 열기
+        const webviewManager = WebviewManager.getInstance();
+        webviewManager.createDynamicAnalysisPanel(context);
+      }
+    );
+
+    context.subscriptions.push(staticAnalysisCommand);
+    context.subscriptions.push(dynamicAnalysisCommand);
 
     const debounceDelay = 500;
 
@@ -85,7 +173,6 @@ export function activate(context: vscode.ExtensionContext) {
         minAnalysisLength: config.get<number>("minAnalysisLength", 10),
         pythonPath: config.get<string | null>("pythonPath", null),
         enableInlayHints: config.get<boolean>("enableInlayHints", true),
-        memoryLimit: config.get<number>("memoryLimit", 100000000),
       };
     }
 
@@ -132,18 +219,161 @@ export function activate(context: vscode.ExtensionContext) {
     function checkPythonPackages(pythonExecutable: string): {
       missing: string[];
     } {
-      const requiredPackages = ["parso", "astroid", "networkx"];
+      const requiredPackages = ["parso", "astroid", "networkx", "astor", "google-genai"];
       const missingPackages = requiredPackages.filter((pkg) => {
         try {
-          execSync(`"${pythonExecutable}" -m pip show "${pkg}"`, {
-            stdio: "pipe",
-          });
-          return false;
+          // google-genai는 import 테스트도 추가로 수행
+          if (pkg === "google-genai") {
+            // 먼저 pip show로 확인
+            execSync(`"${pythonExecutable}" -m pip show "${pkg}"`, {
+              stdio: "pipe",
+            });
+            
+            // 추가로 import 테스트 수행
+            try {
+              execSync(`"${pythonExecutable}" -c "from google import genai; print('google-genai import successful')"`, {
+                stdio: "pipe",
+              });
+            } catch (importError) {
+              console.warn("google-genai import test failed:", importError);
+              return true; // import 실패 시 누락된 것으로 간주
+            }
+            return false;
+          } else {
+            execSync(`"${pythonExecutable}" -m pip show "${pkg}"`, {
+              stdio: "pipe",
+            });
+            return false;
+          }
         } catch {
           return true;
         }
       });
       return { missing: missingPackages };
+    }
+
+    async function installMissingPackages(pythonExecutable: string, missingPackages: string[]): Promise<boolean> {
+      try {
+        // 각 패키지를 개별적으로 설치하여 더 안정적으로 처리
+        for (const pkg of missingPackages) {
+          try {
+            let installCommand: string;
+            
+            // google-genai 패키지는 특별한 처리가 필요할 수 있음
+            if (pkg === "google-genai") {
+              installCommand = `"${pythonExecutable}" -m pip install "google-genai>=0.3.0"`;
+            } else {
+              installCommand = `"${pythonExecutable}" -m pip install "${pkg}"`;
+            }
+            
+            execSync(installCommand, { stdio: "pipe" });
+            console.log(`Successfully installed ${pkg}`);
+          } catch (error) {
+            console.error(`Failed to install ${pkg}:`, error);
+            
+            // google-genai 설치 실패 시 대안 시도
+            if (pkg === "google-genai") {
+              try {
+                console.log("Trying alternative installation for google-genai...");
+                const altCommand = `"${pythonExecutable}" -m pip install --upgrade google-genai`;
+                execSync(altCommand, { stdio: "pipe" });
+                console.log("Successfully installed google-genai with alternative method");
+              } catch (altError) {
+                console.error("Alternative installation also failed:", altError);
+              }
+            }
+            // 개별 패키지 설치 실패 시에도 계속 진행
+          }
+        }
+        
+        // 설치 후 다시 확인하여 실제로 설치된 패키지들 확인
+        const recheckResult = checkPythonPackages(pythonExecutable);
+        const stillMissing = recheckResult.missing.filter(pkg => missingPackages.includes(pkg));
+        
+        if (stillMissing.length > 0) {
+          console.warn(`Still missing packages after installation: ${stillMissing.join(", ")}`);
+          return false;
+        }
+        
+        return true;
+      } catch (error) {
+        console.error("Failed to install packages:", error);
+        return false;
+      }
+    }
+
+    async function promptInstallPackages(pythonExecutable: string, missingPackages: string[]): Promise<boolean> {
+      const message = `필요한 Python 패키지가 설치되지 않았습니다: ${missingPackages.join(", ")}`;
+      const install = "자동 설치";
+      const manual = "수동 설치";
+      const cancel = "취소";
+      
+      const choice = await vscode.window.showWarningMessage(
+        message,
+        install,
+        manual,
+        cancel
+      );
+      
+      if (choice === install) {
+        const progressOptions = {
+          location: vscode.ProgressLocation.Notification,
+          title: "Python 패키지 설치 중...",
+          cancellable: false
+        };
+        
+        return await vscode.window.withProgress(progressOptions, async (progress) => {
+          progress.report({ message: "패키지를 설치하는 중..." });
+          
+          const success = await installMissingPackages(pythonExecutable, missingPackages);
+          
+          if (success) {
+            vscode.window.showInformationMessage("모든 패키지 설치가 완료되었습니다.");
+            checkedPackages = false; // 재확인을 위해 리셋
+            return true;
+          } else {
+            // 설치에 실패한 패키지들 확인
+            const recheckResult = checkPythonPackages(pythonExecutable);
+            const stillMissing = recheckResult.missing.filter(pkg => missingPackages.includes(pkg));
+            
+            if (stillMissing.length > 0) {
+              vscode.window.showErrorMessage(
+                `일부 패키지 설치에 실패했습니다: ${stillMissing.join(", ")}\n수동으로 설치해주세요.`
+              );
+            } else {
+              vscode.window.showInformationMessage("패키지 설치가 완료되었습니다.");
+              checkedPackages = false;
+              return true;
+            }
+            return false;
+          }
+        });
+      } else if (choice === manual) {
+        const terminal = vscode.window.createTerminal("Package Installation");
+        
+        // google-genai가 포함된 경우 특별한 안내 제공
+        if (missingPackages.includes("google-genai")) {
+          terminal.sendText(`# Google Generative AI 패키지 설치`);
+          terminal.sendText(`# 만약 설치에 문제가 있다면 다음 명령어를 시도해보세요:`);
+          terminal.sendText(`# ${pythonExecutable} -m pip install --upgrade google-genai`);
+          terminal.sendText(``);
+        }
+        
+        terminal.sendText(`${pythonExecutable} -m pip install ${missingPackages.join(" ")}`);
+        terminal.show();
+        
+        if (missingPackages.includes("google-genai")) {
+          vscode.window.showInformationMessage(
+            "터미널에서 패키지를 설치한 후 다시 시도해주세요.\n" +
+            "google-genai 설치에 문제가 있다면 --upgrade 옵션을 사용해보세요."
+          );
+        } else {
+          vscode.window.showInformationMessage("터미널에서 패키지를 설치한 후 다시 시도해주세요.");
+        }
+        return false;
+      }
+      
+      return false;
     }
 
     async function runAnalysisProcess(
@@ -171,12 +401,15 @@ export function activate(context: vscode.ExtensionContext) {
         lastUsedPythonExecutable = pythonExecutable;
         checkedPackages = false;
       }
-      return new Promise((resolve) => {
-        try {
-          if (!checkedPackages) {
-            const checkResult = checkPythonPackages(pythonExecutable);
-            if (checkResult.missing.length > 0) {
-              resolve({
+      
+      try {
+        if (!checkedPackages) {
+          const checkResult = checkPythonPackages(pythonExecutable);
+          if (checkResult.missing.length > 0) {
+            // 패키지 설치 옵션 제공
+            const installSuccess = await promptInstallPackages(pythonExecutable, checkResult.missing);
+            if (!installSuccess) {
+              return {
                 errors: [
                   {
                     message: `Missing packages: ${checkResult.missing.join(
@@ -188,25 +421,44 @@ export function activate(context: vscode.ExtensionContext) {
                   },
                 ],
                 call_graph: null,
-              });
-              return;
+              };
             }
-            checkedPackages = true;
+            // 패키지 설치 후 다시 확인
+            const recheckResult = checkPythonPackages(pythonExecutable);
+            if (recheckResult.missing.length > 0) {
+              return {
+                errors: [
+                  {
+                    message: `Still missing packages after installation: ${recheckResult.missing.join(
+                      ", "
+                    )}. Please install them manually.`,
+                    line: 1,
+                    column: 0,
+                    errorType: "MissingDependencyError",
+                  },
+                ],
+                call_graph: null,
+              };
+            }
           }
-          const scriptPath = path.join(
-            context.extensionPath,
-            "scripts",
-            "main.py"
-          );
-          const baseDir = documentUri
-            ? path.dirname(documentUri.fsPath)
-            : context.extensionPath;
-          const args = [scriptPath, mode, baseDir];
-          const spawnOptions: SpawnOptionsWithoutStdio = {
-            cwd: path.dirname(scriptPath),
-          };
-          const pythonProcess = spawn(pythonExecutable, args, spawnOptions);
+          checkedPackages = true;
+        }
+        
+        const scriptPath = path.join(
+          context.extensionPath,
+          "scripts",
+          "main.py"
+        );
+        const baseDir = documentUri
+          ? path.dirname(documentUri.fsPath)
+          : context.extensionPath;
+        const args = [scriptPath, mode, baseDir];
+        const spawnOptions: SpawnOptionsWithoutStdio = {
+          cwd: path.dirname(scriptPath),
+        };
+        const pythonProcess = spawn(pythonExecutable, args, spawnOptions);
 
+        return new Promise((resolve) => {
           let stdoutData = "";
           let stderrData = "";
           pythonProcess.stdin.write(code, "utf-8");
@@ -266,20 +518,20 @@ export function activate(context: vscode.ExtensionContext) {
               call_graph: null,
             });
           });
-        } catch (e: any) {
-          resolve({
-            errors: [
-              {
-                message: `Error setting up analysis: ${e.message}`,
-                line: 1,
-                column: 0,
-                errorType: "SetupError",
-              },
-            ],
-            call_graph: null,
-          });
-        }
-      });
+        });
+      } catch (e: any) {
+        return {
+          errors: [
+            {
+              message: `Error setting up analysis: ${e.message}`,
+              line: 1,
+              column: 0,
+              errorType: "SetupError",
+            },
+          ],
+          call_graph: null,
+        };
+      }
     }
 
     async function runDynamicAnalysisProcess(
@@ -287,7 +539,6 @@ export function activate(context: vscode.ExtensionContext) {
       documentUri?: vscode.Uri
     ): Promise<AnalysisResult> {
       let pythonExecutable: string;
-      const config = getConfiguration();
       try {
         pythonExecutable = await getSelectedPythonPath(documentUri);
       } catch (e: any) {
@@ -306,19 +557,40 @@ export function activate(context: vscode.ExtensionContext) {
       // Check packages
       const pkgCheck = checkPythonPackages(pythonExecutable);
       if (pkgCheck.missing.length > 0) {
-        return {
-          errors: [
-            {
-              message: `Missing packages: ${pkgCheck.missing.join(
-                ", "
-              )}. Please install in ${pythonExecutable}.`,
-              line: 1,
-              column: 0,
-              errorType: "MissingDependencyError",
-            },
-          ],
-          call_graph: null,
-        };
+        // 패키지 설치 옵션 제공
+        const installSuccess = await promptInstallPackages(pythonExecutable, pkgCheck.missing);
+        if (!installSuccess) {
+          return {
+            errors: [
+              {
+                message: `Missing packages: ${pkgCheck.missing.join(
+                  ", "
+                )}. Please install in ${pythonExecutable}.`,
+                line: 1,
+                column: 0,
+                errorType: "MissingDependencyError",
+              },
+            ],
+            call_graph: null,
+          };
+        }
+        // 패키지 설치 후 다시 확인
+        const recheckResult = checkPythonPackages(pythonExecutable);
+        if (recheckResult.missing.length > 0) {
+          return {
+            errors: [
+              {
+                message: `Still missing packages after installation: ${recheckResult.missing.join(
+                  ", "
+                )}. Please install them manually.`,
+                line: 1,
+                column: 0,
+                errorType: "MissingDependencyError",
+              },
+            ],
+            call_graph: null,
+          };
+        }
       }
 
       const extensionRootPath = context.extensionPath;
@@ -347,11 +619,7 @@ export function activate(context: vscode.ExtensionContext) {
         const proc = dynamicProcess;
         let stdoutData = "";
         let stderrData = "";
-        const runtimeData = {
-          code,
-          memory_limit: config.memoryLimit
-        };
-        proc.stdin?.write(JSON.stringify(runtimeData), "utf-8");
+        proc.stdin?.write(code);
         proc.stdin?.end();
         proc.stdout?.on("data", (data) => {
           stdoutData += data;
@@ -426,12 +694,34 @@ export function activate(context: vscode.ExtensionContext) {
     function handleAnalysisResult(
       documentUri: vscode.Uri,
       config: ExtensionConfig,
-      result: AnalysisResult
+      result: AnalysisResult,
+      mode: "realtime" | "static" = "realtime"
     ) {
       if (!result || !Array.isArray(result.errors)) return;
       const filteredErrors = result.errors.filter(
         (err) => !config.ignoredErrorTypes.includes(err.errorType.toLowerCase())
       );
+      
+      // 분석 결과 저장
+      if (mode === "realtime") {
+        // 파일 경로 정보 추가
+        const errorsWithPath = filteredErrors.map(error => ({
+          ...error,
+          filePath: documentUri.fsPath
+        }));
+        saveRealtimeAnalysisResult(documentUri.toString(), errorsWithPath);
+        // 웹뷰 자동 갱신
+        const webviewManager = WebviewManager.getInstance();
+        webviewManager.updateRealtimeErrorsInWebview();
+      } else if (mode === "static") {
+        // 파일 경로 정보 추가
+        const errorsWithPath = filteredErrors.map(error => ({
+          ...error,
+          filePath: documentUri.fsPath
+        }));
+        savePreciseAnalysisResult(documentUri.toString(), errorsWithPath);
+      }
+      
       const inlayHints = createInlayHints(filteredErrors, config);
       inlayHintsCache.set(documentUri.toString(), inlayHints);
       displayDiagnostics(documentUri, config, filteredErrors);
@@ -556,7 +846,7 @@ export function activate(context: vscode.ExtensionContext) {
         }
         clearPreviousAnalysis(document.uri);
         runAnalysisProcess(document.getText(), "realtime", document.uri)
-          .then((result) => handleAnalysisResult(document.uri, config, result))
+          .then((result) => handleAnalysisResult(document.uri, config, result, "realtime"))
           .catch(() => {}); // Errors are handled inside runAnalysisProcess
       }, debounceDelay);
     };
@@ -615,7 +905,7 @@ export function activate(context: vscode.ExtensionContext) {
                   "static",
                   editor.document.uri
                 );
-                handleAnalysisResult(editor.document.uri, config, result);
+                handleAnalysisResult(editor.document.uri, config, result, "static");
                 vscode.window.showInformationMessage(
                   `정적 분석 완료. ${result.errors.length}개 이슈 발견.`
                 );
@@ -628,44 +918,49 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(
       vscode.commands.registerCommand(
         "findRuntimeErr.runDynamicAnalysis",
-
-        () => {
+        async () => {
           const editor = vscode.window.activeTextEditor;
           if (editor && editor.document.languageId === "python") {
             outputChannel.appendLine("[Command] findRuntimeErr.runDynamicAnalysis executed.");
             const config = getConfiguration();
             clearPreviousAnalysis(editor.document.uri);
 
-            runDynamicAnalysisProcess(editor.document.getText(), editor.document.uri)
-              .then((result) => {
-                handleAnalysisResult(editor.document.uri, config, result);
-                // Function-level error summary
-                const summaryCounts: { [fn: string]: number } = {};
-                result.errors.forEach(err => {
-                  const match = err.message.match(/Function `(.+?)` failed/);
-                  const fn = match ? match[1] : 'unknown';
-                  summaryCounts[fn] = (summaryCounts[fn] || 0) + 1;
-                });
-                outputChannel.appendLine('[Dynamic Analysis Summary]');
-                for (const [fn, cnt] of Object.entries(summaryCounts)) {
-                  outputChannel.appendLine(`  ${fn}: ${cnt} error(s)`);
-                }
-                vscode.window.showInformationMessage(
-                  `FindRuntimeErr: Dynamic analysis completed. ${result.errors.length} error(s) found.`
-                );
-              })
-              .catch((error) => {
-                outputChannel.appendLine(`[Command Error] Dynamic analysis failed: ${error.message}`);
-                vscode.window.showErrorMessage(
-                  `FindRuntimeErr: Dynamic analysis failed. ${error.message}`
-                );
+            try {
+              const result = await runDynamicAnalysisProcess(editor.document.getText(), editor.document.uri);
+              
+              // 동적분석 결과 저장
+              saveDynamicAnalysisResult(editor.document.uri.toString(), result);
+              
+              // Function-level error summary
+              const summaryCounts: { [fn: string]: number } = {};
+              result.errors.forEach(err => {
+                const match = err.message.match(/Function `(.+?)` failed/);
+                const fn = match ? match[1] : 'unknown';
+                summaryCounts[fn] = (summaryCounts[fn] || 0) + 1;
               });
+              outputChannel.appendLine('[Dynamic Analysis Summary]');
+              for (const [fn, cnt] of Object.entries(summaryCounts)) {
+                outputChannel.appendLine(`  ${fn}: ${cnt} error(s)`);
+              }
+              vscode.window.showInformationMessage(
+                `FindRuntimeErr: Dynamic analysis completed. ${result.errors.length} error(s) found.`
+              );
+              
+              return result; // Promise 결과로 반환
+            } catch (error: any) {
+              outputChannel.appendLine(`[Command Error] Dynamic analysis failed: ${error.message}`);
+              vscode.window.showErrorMessage(
+                `FindRuntimeErr: Dynamic analysis failed. ${error.message}`
+              );
+              throw error; // 오류를 다시 던져서 웹뷰에서 감지할 수 있도록 함
+            }
           } else {
-            vscode.window.showWarningMessage(
-              "FindRuntimeErr: Please open a Python file to run dynamic analysis."
-            );
+            const errorMessage = "FindRuntimeErr: Please open a Python file to run dynamic analysis.";
+            vscode.window.showWarningMessage(errorMessage);
+            throw new Error(errorMessage);
           }
-        })
+        }
+      )
     );
     // Command to kill the running dynamic analysis Python process
     context.subscriptions.push(
