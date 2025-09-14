@@ -19,6 +19,12 @@ class StaticFileNotFoundChecker(BaseAstroidChecker):
                 if node.args and isinstance(node.args[0], astroid.Const):
                     file_path = node.args[0].value
                     if isinstance(file_path, str):
+                        # 테스트 파일이나 임시 파일은 무시
+                        if (file_path.startswith('test') and file_path.endswith('.csv')) or \
+                           file_path.startswith('temp_') or \
+                           file_path.startswith('tmp_'):
+                            return
+                        
                         import os
                         if not os.path.exists(file_path):
                             self.add_message(node, '0601', (file_path,))

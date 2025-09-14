@@ -234,12 +234,23 @@ export class WebviewManager {
             margin-bottom: 8px;
           }
           .error-type {
-            background-color: var(--vscode-errorForeground);
-            color: var(--vscode-editor-background);
             padding: 4px 8px;
             border-radius: 4px;
             font-size: 12px;
             font-weight: bold;
+            color: white;
+          }
+          .error-critical {
+            background-color: #dc3545; /* 빨간색 */
+          }
+          .error-high {
+            background-color: #fd7e14; /* 주황색 */
+          }
+          .error-medium {
+            background-color: #0d6efd; /* 파란색 */
+          }
+          .error-low {
+            background-color: #6c757d; /* 회색 */
           }
           .error-location {
             color: var(--vscode-descriptionForeground);
@@ -393,6 +404,38 @@ export class WebviewManager {
             });
           }
 
+          function getErrorSeverity(errorMessage) {
+            // 오류 메시지에서 오류 타입을 추출하여 심각도 결정
+            const message = (errorMessage || '').toLowerCase();
+            
+            // Critical: ImportError, NameError, ZeroDivisionError, FileNotFoundError
+            if (message.includes('importerror') || 
+                message.includes('nameerror') || 
+                message.includes('zerodivisionerror') || 
+                message.includes('filenotfounderror')) {
+              return { level: 'Critical', class: 'error-critical' };
+            }
+            
+            // High: AttributeError, IndexError, KeyError, TypeError, RecursionError
+            else if (message.includes('attributeerror') || 
+                     message.includes('indexerror') || 
+                     message.includes('keyerror') || 
+                     message.includes('typeerror') || 
+                     message.includes('recursionerror')) {
+              return { level: 'High', class: 'error-high' };
+            }
+            
+            // Medium: 무한 루프 관련
+            else if (message.includes('infinite') || message.includes('loop')) {
+              return { level: 'Medium', class: 'error-medium' };
+            }
+            
+            // Low: 기타 모든 오류
+            else {
+              return { level: 'Low', class: 'error-low' };
+            }
+          }
+
           function renderErrorList(containerId, errors) {
             const container = document.getElementById(containerId);
             
@@ -401,16 +444,19 @@ export class WebviewManager {
               return;
             }
             
-            const errorHtml = errors.map(error => \`
-              <div class="error-item" onclick="goToError(\${error.line || 1}, \${error.column || 0}, '\${error.filePath || ''}')">
-                <div class="error-header">
-                  <span class="error-type">\${error.errorType || 'Error'}</span>
-                  <span class="error-location">줄 \${error.line || 'N/A'}, 열 \${error.column || 'N/A'}</span>
+            const errorHtml = errors.map(error => {
+              const severity = getErrorSeverity(error.message || '');
+              return \`
+                <div class="error-item" onclick="goToError(\${error.line || 1}, \${error.column || 0}, '\${error.filePath || ''}')">
+                  <div class="error-header">
+                    <span class="error-type \${severity.class}">\${severity.level}</span>
+                    <span class="error-location">줄 \${error.line || 'N/A'}, 열 \${error.column || 'N/A'}</span>
+                  </div>
+                  <div class="error-message">\${error.message}</div>
+                  \${error.memoryUsage ? \`<div class="error-memory">메모리 사용량: \${error.memoryUsage} bytes</div>\` : ''}
                 </div>
-                <div class="error-message">\${error.message}</div>
-                \${error.memoryUsage ? \`<div class="error-memory">메모리 사용량: \${error.memoryUsage} bytes</div>\` : ''}
-              </div>
-            \`).join('');
+              \`;
+            }).join('');
             
             container.innerHTML = errorHtml;
           }
@@ -664,12 +710,23 @@ export class WebviewManager {
             margin-bottom: 8px;
           }
           .error-type {
-            background-color: var(--vscode-errorForeground);
-            color: var(--vscode-editor-background);
             padding: 4px 8px;
             border-radius: 4px;
             font-size: 12px;
             font-weight: bold;
+            color: white;
+          }
+          .error-critical {
+            background-color: #dc3545; /* 빨간색 */
+          }
+          .error-high {
+            background-color: #fd7e14; /* 주황색 */
+          }
+          .error-medium {
+            background-color: #0d6efd; /* 파란색 */
+          }
+          .error-low {
+            background-color: #6c757d; /* 회색 */
           }
           .error-memory {
             background-color: var(--vscode-warningForeground);
@@ -683,6 +740,50 @@ export class WebviewManager {
             color: var(--vscode-editor-foreground);
             font-size: 14px;
             line-height: 1.4;
+          }
+          .error-details {
+            margin-top: 10px;
+            padding: 10px;
+            background-color: var(--vscode-editor-inactiveSelectionBackground);
+            border-radius: 4px;
+            border-left: 3px solid var(--vscode-errorForeground);
+          }
+          .function-name {
+            font-weight: bold;
+            color: var(--vscode-editor-foreground);
+            margin-bottom: 8px;
+            font-size: 14px;
+          }
+          .test-case-info {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+          }
+          .test-input, .test-expected, .test-actual {
+            display: flex;
+            align-items: flex-start;
+            gap: 8px;
+            font-size: 13px;
+          }
+          .test-input strong, .test-expected strong, .test-actual strong {
+            color: var(--vscode-editor-foreground);
+            min-width: 60px;
+            flex-shrink: 0;
+          }
+          .input-values, .expected-value, .actual-value {
+            color: var(--vscode-textPreformat-foreground);
+            font-family: 'Courier New', monospace;
+            background-color: var(--vscode-editor-background);
+            padding: 2px 6px;
+            border-radius: 3px;
+            word-break: break-all;
+            flex: 1;
+          }
+          .expected-value {
+            color: var(--vscode-gitDecoration-untrackedResourceForeground);
+          }
+          .actual-value {
+            color: var(--vscode-errorForeground);
           }
           .no-errors {
             text-align: center;
@@ -796,16 +897,8 @@ export class WebviewManager {
             <div class="file-path" id="currentFilePath">파일을 선택해주세요</div>
           </div>
           
-          <!-- 탭 컨테이너 -->
-          <div class="tab-container">
-            <div class="tab-buttons">
-              <button class="tab-button active" onclick="switchTab('ai')">AI 테스트케이스 생성</button>
-              <button class="tab-button" onclick="switchTab('manual')">수동 테스트케이스 생성</button>
-            </div>
-          </div>
-          
-          <!-- AI 테스트케이스 생성 탭 -->
-          <div id="ai-tab" class="tab-content active">
+          <!-- AI 테스트케이스 생성 -->
+          <div id="ai-tab">
             <div class="analysis-section">
               <h3>AI 테스트케이스 생성 설정</h3>
               <div class="input-group">
@@ -814,7 +907,6 @@ export class WebviewManager {
                 <button class="button" onclick="setMemoryLimit()">설정</button>
               </div>
               <button class="button" onclick="generateAITests()" id="generateButton">AI 테스트케이스 생성</button>
-              <div id="aiTestStatus" class="status">상태: 대기 중</div>
             </div>
             
             <!-- 진행 상황 표시 영역 -->
@@ -836,50 +928,17 @@ export class WebviewManager {
             </div>
             
             <div class="analysis-section">
-              <h3>AI 테스트케이스 결과</h3>
-              <div id="testResults">
-                <div class="no-tests">AI 테스트케이스 결과가 여기에 표시됩니다.</div>
-              </div>
-            </div>
-            
-            <div class="analysis-section">
               <h3>발견된 오류</h3>
               <div id="errorList">
                 <div class="no-errors">오류가 없습니다.</div>
               </div>
             </div>
           </div>
-          
-          <!-- 수동 테스트케이스 생성 탭 -->
-          <div id="manual-tab" class="tab-content">
-            <div class="analysis-section">
-              <h3>수동 테스트케이스 생성</h3>
-              <p>이 기능은 아직 구현되지 않았습니다.</p>
-              <div class="no-tests">수동 테스트케이스 생성 기능이 곧 추가될 예정입니다.</div>
-            </div>
-          </div>
         </div>
 
         <script>
           const vscode = acquireVsCodeApi();
-          let currentTab = 'ai';
           let memoryLimit = 1048576; // 기본값: 1MB
-
-          function switchTab(tabName) {
-            // 탭 버튼 상태 변경
-            document.querySelectorAll('.tab-button').forEach(btn => {
-              btn.classList.remove('active');
-            });
-            document.querySelector(\`[onclick="switchTab('\${tabName}')"]\`).classList.add('active');
-            
-            // 탭 콘텐츠 상태 변경
-            document.querySelectorAll('.tab-content').forEach(content => {
-              content.classList.remove('active');
-            });
-            document.getElementById(\`\${tabName}-tab\`).classList.add('active');
-            
-            currentTab = tabName;
-          }
 
           function setMemoryLimit() {
             const input = document.getElementById('memoryLimit');
@@ -966,35 +1025,13 @@ export class WebviewManager {
             }
           }
 
+
           function resetButtonState() {
             const button = document.getElementById('generateButton');
             button.disabled = false;
             button.textContent = 'AI 테스트케이스 생성';
           }
 
-          function renderTestResults(results) {
-            const container = document.getElementById('testResults');
-            
-            if (!results || results.length === 0) {
-              container.innerHTML = '<div class="no-tests">테스트 결과가 없습니다.</div>';
-              return;
-            }
-            
-            const resultsHtml = results.map(result => \`
-              <div class="test-result">
-                <div class="function-name">\${result.functionName}</div>
-                \${result.testCases.map(testCase => \`
-                  <div class="test-case \${testCase.success ? 'test-success' : 'test-failure'}">
-                    <div class="test-input">입력: \${testCase.input}</div>
-                    <div class="test-expected">예상값: \${testCase.expected}</div>
-                    <div class="test-actual">실제값: \${testCase.actual}</div>
-                  </div>
-                \`).join('')}
-              </div>
-            \`).join('');
-            
-            container.innerHTML = resultsHtml;
-          }
 
           function renderErrorList(errors) {
             const container = document.getElementById('errorList');
@@ -1004,16 +1041,54 @@ export class WebviewManager {
               return;
             }
             
-            const errorHtml = errors.map((error, index) => \`
-              <div class="error-item" onclick="goToError(\${error.line || 1}, \${error.column || 0}, '\${error.filePath || ''}')">
-                <div class="error-header">
-                  <span class="error-type">\${error.errorType || 'Error'}</span>
-                  <span class="error-location">줄 \${error.line || 'N/A'}, 열 \${error.column || 'N/A'}</span>
-                </div>
-                <div class="error-message">\${error.message}</div>
-                \${error.memoryUsage ? \`<div class="error-memory">메모리 사용량: \${error.memoryUsage} bytes</div>\` : ''}
-              </div>
-            \`).join('');
+            const errorHtml = errors.map((error, index) => {
+              // 파싱된 데이터가 있으면 사용, 없으면 기본 메시지 표시
+              if (error.parsed) {
+                return \`
+                  <div class="error-item" onclick="goToError(\${error.line || 1}, \${error.column || 0}, '\${error.filePath || ''}')">
+                    <div class="error-header">
+                      <span class="error-type">\${error.errorType || 'Error'}</span>
+                      <span class="error-location">줄 \${error.line || 'N/A'}, 열 \${error.column || 'N/A'}</span>
+                    </div>
+                    
+                    <div class="error-details">
+                      <div class="function-name">함수: \${error.parsed.function}</div>
+                      
+                      <div class="test-case-info">
+                        <div class="test-input">
+                          <strong>입력값:</strong> 
+                          <span class="input-values">\${JSON.stringify(error.parsed.input)}</span>
+                        </div>
+                        
+                        <div class="test-expected">
+                          <strong>기대값:</strong> 
+                          <span class="expected-value">\${error.parsed.expected}</span>
+                        </div>
+                        
+                        <div class="test-actual">
+                          <strong>실제값:</strong> 
+                          <span class="actual-value">\${error.parsed.got}</span>
+                        </div>
+                      </div>
+                    </div>
+                    
+                    \${error.memoryUsage ? \`<div class="error-memory">메모리 사용량: \${error.memoryUsage} bytes</div>\` : ''}
+                  </div>
+                \`;
+              } else {
+                // 파싱된 데이터가 없는 경우 기본 표시
+                return \`
+                  <div class="error-item" onclick="goToError(\${error.line || 1}, \${error.column || 0}, '\${error.filePath || ''}')">
+                    <div class="error-header">
+                      <span class="error-type">\${error.errorType || 'Error'}</span>
+                      <span class="error-location">줄 \${error.line || 'N/A'}, 열 \${error.column || 'N/A'}</span>
+                    </div>
+                    <div class="error-message">\${error.message}</div>
+                    \${error.memoryUsage ? \`<div class="error-memory">메모리 사용량: \${error.memoryUsage} bytes</div>\` : ''}
+                  </div>
+                \`;
+              }
+            }).join('');
             
             container.innerHTML = errorHtml;
           }
@@ -1031,15 +1106,6 @@ export class WebviewManager {
           window.addEventListener('message', event => {
             const message = event.data;
             switch (message.command) {
-              case 'updateAITestStatus':
-                document.getElementById('aiTestStatus').textContent = '상태: ' + message.status;
-                break;
-              case 'updateUserTestStatus':
-                document.getElementById('userTestStatus').textContent = '상태: ' + message.status;
-                break;
-              case 'updateTestResults':
-                renderTestResults(message.results);
-                break;
               case 'updateErrorList':
                 renderErrorList(message.errors);
                 break;
@@ -1305,15 +1371,6 @@ export class WebviewManager {
       case 'runUserTests':
         await this.runUserTests(message.testInput);
         break;
-      case 'updateAITestStatus':
-        await this.updateAITestStatus(message.status);
-        break;
-      case 'updateUserTestStatus':
-        await this.updateUserTestStatus(message.status);
-        break;
-      case 'updateTestResults':
-        await this.updateTestResults(message.results);
-        break;
       case 'goToError':
         await this.goToError(message.line, message.column, message.filePath);
         break;
@@ -1478,25 +1535,6 @@ export class WebviewManager {
         // 실제 동적분석 결과를 사용
         const latestResult = dynamicResults[dynamicResults.length - 1];
         
-        // AI 테스트케이스 결과 생성
-        const testResults = [
-          {
-            functionName: "AI 생성 테스트케이스",
-            testCases: latestResult.errors.map((error: any) => {
-              // 오류 메시지에서 함수명 추출 시도
-              const functionMatch = error.message.match(/Function `(.+?)`/);
-              const functionName = functionMatch ? functionMatch[1] : '알 수 없는 함수';
-              
-              return {
-                input: `함수: ${functionName}`,
-                expected: "정상 실행 (예상)",
-                actual: `${error.errorType}: ${error.message}`,
-                success: false
-              };
-            })
-          }
-        ];
-
         // 오류 목록 생성 (line, column 정보 포함)
         const errors = latestResult.errors.map((error: any) => ({
           errorType: error.errorType,
@@ -1504,25 +1542,16 @@ export class WebviewManager {
           line: error.line || 1,
           column: error.column || 0,
           filePath: targetFile,
-          memoryUsage: error.memoryUsage || null
+          memoryUsage: error.memoryUsage || null,
+          parsed: this.parseErrorMessage(error.message) // 오류 메시지 파싱
         }));
-
-        this.dynamicAnalysisPanel.webview.postMessage({
-          command: 'updateTestResults',
-          results: testResults
-        });
 
         this.dynamicAnalysisPanel.webview.postMessage({
           command: 'updateErrorList',
           errors: errors
         });
       } else {
-        // 결과가 없는 경우 빈 결과 표시
-        this.dynamicAnalysisPanel.webview.postMessage({
-          command: 'updateTestResults',
-          results: []
-        });
-
+        // 결과가 없는 경우 빈 오류 목록 표시
         this.dynamicAnalysisPanel.webview.postMessage({
           command: 'updateErrorList',
           errors: []
@@ -1564,53 +1593,16 @@ export class WebviewManager {
   private async runUserTests(testInput: string): Promise<void> {
     if (!this.dynamicAnalysisPanel) return;
 
-    this.dynamicAnalysisPanel.webview.postMessage({
-      command: 'updateUserTestStatus',
-      status: '분석 중...'
-    });
-
     try {
       // 사용자 테스트 실행 로직 구현
       // 이 부분은 실제 구현 로직에 따라 변경될 수 있습니다.
-      this.dynamicAnalysisPanel.webview.postMessage({
-        command: 'updateUserTestStatus',
-        status: '완료됨'
-      });
+      vscode.window.showInformationMessage('사용자 테스트가 완료되었습니다.');
     } catch (error) {
-      this.dynamicAnalysisPanel.webview.postMessage({
-        command: 'updateUserTestStatus',
-        status: '오류 발생'
-      });
       vscode.window.showErrorMessage(`사용자 테스트 실행 중 오류가 발생했습니다: ${error}`);
     }
   }
 
-  private async updateAITestStatus(status: string): Promise<void> {
-    if (!this.dynamicAnalysisPanel) return;
 
-    this.dynamicAnalysisPanel.webview.postMessage({
-      command: 'updateAITestStatus',
-      status: status
-    });
-  }
-
-  private async updateUserTestStatus(status: string): Promise<void> {
-    if (!this.dynamicAnalysisPanel) return;
-
-    this.dynamicAnalysisPanel.webview.postMessage({
-      command: 'updateUserTestStatus',
-      status: status
-    });
-  }
-
-  private async updateTestResults(results: string): Promise<void> {
-    if (!this.dynamicAnalysisPanel) return;
-
-    this.dynamicAnalysisPanel.webview.postMessage({
-      command: 'updateTestResults',
-      results: results
-    });
-  }
 
   // Python 실행 파일 경로 가져오기
   private async getPythonExecutable(): Promise<string> {
@@ -1786,5 +1778,48 @@ export class WebviewManager {
       command: 'updateCurrentFile',
       filePath: filePath
     });
+  }
+
+  // 오류 메시지 파싱 함수
+  private parseErrorMessage(message: string): any {
+    // Step 1: 입력값 추출 - "input [ ... ]" 부분 찾기
+    const inputMatch = message.match(/input\s*\[([^\]]+)\]/);
+    let input: any[] = [];
+    if (inputMatch) {
+      try {
+        // 대괄호 안의 내용을 JSON 배열로 파싱
+        input = JSON.parse('[' + inputMatch[1] + ']');
+      } catch (e) {
+        // JSON 파싱 실패 시 문자열로 처리
+        input = [inputMatch[1].trim()];
+      }
+    }
+
+    // Step 2: 함수명 추출
+    const functionMatch = message.match(/Function\s*`([^`]+)`/);
+    const functionName = functionMatch ? functionMatch[1] : 'unknown';
+
+    // Step 3: 기대값과 실제값 분리
+    const expectedGotMatch = message.match(/Expected\s*([^,]+),\s*got\s*(.+)$/);
+    let expected: string, got: string;
+    
+    if (expectedGotMatch) {
+      // "Expected X, got Y" 형태가 있는 경우
+      expected = expectedGotMatch[1].trim();
+      got = expectedGotMatch[2].trim();
+    } else {
+      // "Expected X, got Y" 형태가 없는 경우
+      expected = "정상 실행";
+      // input 이후부터 끝까지의 전체 오류 메시지
+      const afterInput = message.replace(/Function\s*`[^`]+`\s*failed\s*on\s*input\s*\[[^\]]+\]:\s*/, '');
+      got = afterInput.trim();
+    }
+
+    return {
+      function: functionName,
+      input: input,
+      expected: expected,
+      got: got
+    };
   }
 } 
